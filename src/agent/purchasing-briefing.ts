@@ -2,7 +2,15 @@ import OpenAI from "openai";
 import { zodTextFormat } from "openai/helpers/zod";
 import { z } from "zod";
 
-import type { PurchasingCase, ScenarioOneEvidence } from "@/domain/purchasing";
+import {
+  executeOptionalToolCalls,
+  optionalToolDefinitions,
+  policySelectedOptionalCalls,
+  runMandatoryInvestigation,
+  type InvestigationToolRead,
+  type OptionalToolCall,
+} from "@/agent/investigation-tools";
+import type { PurchasingCase } from "@/domain/purchasing";
 
 const briefingContentSchema = z.object({
   headline: z.string().min(1).max(120),
@@ -17,59 +25,68 @@ const briefingContentSchema = z.object({
 
 export type BriefingContent = z.infer<typeof briefingContentSchema>;
 
-export interface InvestigationToolRead {
-  tool: string;
-  source: string;
-  observedAt: string;
-  evidenceVersion: string;
-}
-
 export interface AgentBriefing extends BriefingContent {
   mode: "OPENAI" | "DETERMINISTIC_FALLBACK";
   model: string | null;
   generatedAt: string;
   investigationTrace: InvestigationToolRead[];
+  rejectedToolCalls: string[];
   fallbackReason?: string;
 }
 
-interface ReadOnlyEvidenceTool {
-  name: string;
-  evidenceKey: keyof ScenarioOneEvidence;
+function withoutResults(toolResults: ReturnType<typeof runMandatoryInvestigation>): InvestigationToolRead[] {
+  return toolResults.map((item) => ({
+    tool: item.tool,
+    source: item.source,
+    observedAt: item.observedAt,
+    evidenceVersion: item.evidenceVersion,
+    selection: item.selection,
+    rationale: item.rationale,
+  }));
 }
 
-const scenarioOneTools: ReadOnlyEvidenceTool[] = [
-  { name: "get_recommendation", evidenceKey: "recommendation" },
-  { name: "get_inventory_position", evidenceKey: "inventory" },
-  { name: "get_demand_forecast", evidenceKey: "demand" },
-  { name: "get_open_purchase_orders", evidenceKey: "openPurchaseOrders" },
-  { name: "get_supplier_terms", evidenceKey: "supplier" },
-  { name: "get_available_budget", evidenceKey: "budget" },
-  { name: "get_storage_capacity", evidenceKey: "storage" },
-  { name: "get_product_policy", evidenceKey: "productPolicy" },
-];
-
-function runReadOnlyInvestigation(purchasingCase: PurchasingCase) {
-  const toolResults = scenarioOneTools.map((tool) => {
-    const evidence = purchasingCase.evidence[tool.evidenceKey];
-    return {
-      tool: tool.name,
-      evidenceKey: tool.evidenceKey,
-      source: evidence.source,
-      observedAt: evidence.observedAt,
-      evidenceVersion: evidence.version,
-      result: evidence.value,
-    };
+async function selectOptionalTools(
+  client: OpenAI,
+  model: string,
+  purchasingCase: PurchasingCase,
+): Promise<OptionalToolCall[]> {
+  const response = await client.responses.create({
+    model,
+    store: false,
+    parallel_tool_calls: true,
+    tool_choice: "required",
+    tools: optionalToolDefinitions,
+    instructions: [
+      "You are selecting additional read-only investigation tools for a retail purchasing case.",
+      "Choose only tools that materially help explain risk, uncertainty, timing, or constraints in this specific case.",
+      "Do not make a purchasing decision and do not request any write action.",
+      "Use the exact caseId supplied. Keep each rationale concise and evidence-focused.",
+    ].join(" "),
+    input: JSON.stringify({
+      caseId: purchasingCase.id,
+      eventType: purchasingCase.eventType,
+      deterministicDecision: purchasingCase.analysis.decision,
+      planningSignals: {
+        baselineStockoutDate: purchasingCase.analysis.plan?.baselineStockoutDate ?? null,
+        proposedStockoutDate: purchasingCase.analysis.plan?.proposedStockoutDate ?? null,
+        residualShortageUnits: purchasingCase.analysis.plan?.residualShortageUnits ?? null,
+        constraints: purchasingCase.analysis.plan?.constraints ?? [],
+      },
+      evidenceSignals: {
+        forecastConfidence: purchasingCase.evidence.demand.value.forecastConfidence,
+        dailyDemandCurveAvailable: Boolean(purchasingCase.evidence.demand.value.dailyUnits?.length),
+        openPurchaseOrderCount: purchasingCase.evidence.openPurchaseOrders.value.length,
+        supplierReliability: purchasingCase.evidence.supplier.value.deliveryReliability,
+        shelfLifeDays: purchasingCase.evidence.productPolicy.value.shelfLifeDays ?? null,
+        maxOrderUnitsBeforeExpiry:
+          purchasingCase.evidence.productPolicy.value.maxOrderUnitsBeforeExpiry ?? null,
+      },
+    }),
   });
 
-  return {
-    toolResults,
-    trace: toolResults.map(({ tool, source, observedAt, evidenceVersion }) => ({
-      tool,
-      source,
-      observedAt,
-      evidenceVersion,
-    })),
-  };
+  return response.output.flatMap((item) => item.type === "function_call"
+    ? [{ name: item.name, arguments: item.arguments }]
+    : []);
 }
 
 function deterministicBriefing(purchasingCase: PurchasingCase): BriefingContent {
@@ -115,22 +132,41 @@ export async function generatePurchasingBriefing(
   const now = options.now ?? new Date();
   const apiKey = options.apiKey ?? process.env.OPENAI_API_KEY;
   const model = options.model ?? process.env.OPENAI_MODEL ?? "gpt-5.4-mini";
-  const investigation = runReadOnlyInvestigation(purchasingCase);
+  const mandatoryResults = runMandatoryInvestigation(purchasingCase);
   const fallback = deterministicBriefing(purchasingCase);
 
   if (!apiKey) {
+    const optionalInvestigation = executeOptionalToolCalls(
+      purchasingCase,
+      policySelectedOptionalCalls(purchasingCase),
+      "POLICY_SELECTED",
+    );
+    const toolResults = [...mandatoryResults, ...optionalInvestigation.results];
     return {
       ...fallback,
       mode: "DETERMINISTIC_FALLBACK",
       model: null,
       generatedAt: now.toISOString(),
-      investigationTrace: investigation.trace,
+      investigationTrace: withoutResults(toolResults),
+      rejectedToolCalls: optionalInvestigation.rejectedCalls,
       fallbackReason: "OPENAI_API_KEY is not configured.",
     };
   }
 
+  let toolResults = mandatoryResults;
+  let rejectedToolCalls: string[] = [];
+
   try {
     const client = new OpenAI({ apiKey });
+    const requestedTools = await selectOptionalTools(client, model, purchasingCase);
+    const optionalInvestigation = executeOptionalToolCalls(
+      purchasingCase,
+      requestedTools,
+      "MODEL_SELECTED",
+    );
+    toolResults = [...mandatoryResults, ...optionalInvestigation.results];
+    rejectedToolCalls = optionalInvestigation.rejectedCalls;
+
     const response = await client.responses.parse({
       model,
       store: false,
@@ -144,7 +180,8 @@ export async function generatePurchasingBriefing(
       input: JSON.stringify({
         caseId: purchasingCase.id,
         eventType: purchasingCase.eventType,
-        readOnlyToolResults: investigation.toolResults,
+        readOnlyToolResults: toolResults,
+        rejectedToolCalls,
         deterministicAnalysis: purchasingCase.analysis,
         proposal: purchasingCase.proposal,
       }),
@@ -162,16 +199,27 @@ export async function generatePurchasingBriefing(
       mode: "OPENAI",
       model,
       generatedAt: now.toISOString(),
-      investigationTrace: investigation.trace,
+      investigationTrace: withoutResults(toolResults),
+      rejectedToolCalls,
     };
   } catch (error) {
     console.error("OpenAI briefing generation failed; using deterministic fallback.", error);
+    if (toolResults.length === mandatoryResults.length) {
+      const policyInvestigation = executeOptionalToolCalls(
+        purchasingCase,
+        policySelectedOptionalCalls(purchasingCase),
+        "POLICY_SELECTED",
+      );
+      toolResults = [...mandatoryResults, ...policyInvestigation.results];
+      rejectedToolCalls = [...rejectedToolCalls, ...policyInvestigation.rejectedCalls];
+    }
     return {
       ...fallback,
       mode: "DETERMINISTIC_FALLBACK",
       model: null,
       generatedAt: now.toISOString(),
-      investigationTrace: investigation.trace,
+      investigationTrace: withoutResults(toolResults),
+      rejectedToolCalls,
       fallbackReason: "The OpenAI request was unavailable or did not pass schema validation.",
     };
   }

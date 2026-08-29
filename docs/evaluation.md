@@ -83,9 +83,11 @@ The repository currently contains 18 Vitest tests across four files.
 | Material inventory change | Proposal v1 is stopped, proposal v2 requests 350 units, and no PO is created before fresh approval |
 | Supplier shortfall | A 300-of-450 confirmation produces `PARTIALLY_CONFIRMED` and `RECOVERY_REQUIRED` |
 
-### AI-boundary test
+### AI-boundary and tool-selection tests
 
-[`src/agent/purchasing-briefing.test.ts`](../src/agent/purchasing-briefing.test.ts) verifies that all eight required read-only evidence entries appear in the trace and that the deterministic fallback returns the correct 450-unit buyer action without an API key.
+[`src/agent/purchasing-briefing.test.ts`](../src/agent/purchasing-briefing.test.ts) verifies that all eight mandatory evidence reads appear first in the trace, policy-selected optional reads are labelled, and the deterministic fallback returns the correct 450-unit buyer action without an API key.
+
+[`src/agent/investigation-tools.test.ts`](../src/agent/investigation-tools.test.ts) verifies the mandatory evidence gate, case-dependent optional selection, successful model-selected execution, and rejection of unknown, malformed, mismatched-case, duplicate, and over-limit calls.
 
 The live OpenAI call is intentionally not a required unit test. This avoids network, credential, cost, and model-availability dependencies in the correctness suite. Structured Output validation and deterministic fallback protect the runtime path.
 
@@ -123,7 +125,7 @@ Last verified on 2026-08-29:
 
 - TypeScript check: passed;
 - ESLint: passed;
-- Vitest: 18/18 passed;
+- Vitest: 22/22 passed;
 - standalone decision evaluation: 8/8 passed;
 - production build: passed;
 - PostgreSQL migration, seed, approval, and read-back smoke path: passed locally.
@@ -133,7 +135,7 @@ The production build and unit suite do not require an OpenAI key or PostgreSQL. 
 ## Known evaluation limits
 
 - Operational integrations are mocks rather than contract tests against company systems.
-- The live OpenAI response is schema-validated but not scored for prose quality in CI.
+- The live OpenAI response is schema-validated but not scored for tool-selection or prose quality in CI; registry execution and guardrails are tested deterministically.
 - Immediate PO validation uses the mock stored PO payload rather than a separate external PO service.
 - A supplier shortfall enters recovery, but alternate sourcing is intentionally deferred to Scenario 2.
 - Browser-level CI is a future extension; the current UI flow is covered by a documented manual demonstration plus service-level tests.

@@ -114,13 +114,14 @@ The original 800-unit recommendation therefore becomes a `MODIFY` decision for 4
 
 OpenAI is optional. When configured, the model receives:
 
-- the eight read-only evidence results;
+- a compact case summary and four approved function definitions for bounded optional tool selection;
+- the eight mandatory evidence results plus validated optional tool results;
 - the deterministic plan and decision;
 - the exact proposal metadata.
 
-It returns a Zod-validated Structured Output containing a headline, executive summary, evidence insights, risk flags, and buyer action. The prompt prohibits recalculating or changing the quantity, supplier, price, delivery date, or decision.
+The application—not the model—executes every tool. It enforces the exact case ID, strict arguments, a four-call maximum, deduplication, and a read-only allow-list. The model then returns a Zod-validated Structured Output containing a headline, executive summary, evidence insights, risk flags, and buyer action. The prompt prohibits recalculating or changing the quantity, supplier, price, delivery date, or decision.
 
-Without a key, or when the API or schema validation fails, the same endpoint returns a deterministic briefing. The purchasing decision and workflow do not depend on model availability.
+Without a key, deterministic rules select from the same optional registry and the endpoint returns a deterministic briefing. If the API or schema validation fails, the endpoint also falls back safely. The purchasing decision and workflow do not depend on model availability.
 
 ## Approval and delayed-action safety
 

@@ -52,7 +52,7 @@ OPENAI_API_KEY=your_key_here
 OPENAI_MODEL=gpt-5.4-mini
 ```
 
-The implementation uses the OpenAI Responses API with Structured Outputs. The model receives the trace from eight read-only evidence adapters plus the deterministic result; it may explain the decision but cannot alter calculations or authorise/execute spend. Without a key—or if schema validation/API access fails—the UI clearly uses a deterministic fallback. See the official [GPT-5.4 Mini model documentation](https://developers.openai.com/api/docs/models/gpt-5.4-mini).
+The implementation uses the OpenAI Responses API with function calling and Structured Outputs. Eight policy-mandated evidence reads always run; the model may additionally choose from four approved read-only analytical tools. Application code validates the case ID and arguments, rejects unknown/duplicate/over-limit calls, and exposes the complete trace in the UI. A second model call explains the deterministic result but cannot alter calculations or authorise/execute spend. Without a key—or if API/schema validation fails—the same optional tools are selected by deterministic policy and the UI clearly identifies fallback mode. See the official [Responses API documentation](https://developers.openai.com/api/reference/cli/resources/responses/methods/create).
 
 ### Verification
 
@@ -113,9 +113,9 @@ The buyer supervises decisions and approves risk. They do not need to manually c
 
 The agent never assumes that the upstream recommendation is correct. It reconstructs the purchasing position from current evidence.
 
-### 2. AI explains; deterministic code decides and calculates
+### 2. AI investigates and explains; deterministic code decides and calculates
 
-The current Scenario 1 handler gathers a policy-defined set of eight required evidence categories. The optional LLM receives those read-only results plus the deterministic analysis and produces a structured buyer briefing; it does not select tools, calculate the order, or prepare the action.
+The Scenario 1 handler gathers a policy-defined set of eight required evidence categories. When OpenAI is configured, the model dynamically selects additional read-only analytical tools based on case signals. Those calls are bounded, validated, and auditable. The model then receives the evidence plus deterministic analysis and produces a structured buyer briefing; it does not calculate the order, prepare the action, or receive a write tool.
 
 Regular application code performs inventory projections, purchasing calculations, constraint enforcement, approval checks, and exact post-action validation.
 
@@ -368,9 +368,11 @@ flowchart LR
     API --> WF[Purchasing workflow]
     WF --> DB[(Memory or PostgreSQL repository)]
     API --> AGENT[Buyer briefing generator]
-    AGENT --> LLM[Optional OpenAI Responses API]
-    AGENT --> TOOLS[Eight required read-only evidence views]
-    TOOLS --> SERVICES[Versioned mock operational evidence]
+    AGENT --> LLM[Optional OpenAI tool selection + briefing]
+    AGENT --> REQUIRED[Eight mandatory evidence views]
+    LLM --> OPTIONAL[Four bounded optional read tools]
+    REQUIRED --> SERVICES[Versioned mock operational evidence]
+    OPTIONAL --> SERVICES
     WF --> PLAN[Planning engine]
     WF --> RULES[Constraints and policies]
     RULES --> EXEC[Mock action executor]
@@ -396,7 +398,7 @@ flowchart LR
 | Browser verification | Repeatable manual demo; browser-level CI is a future extension |
 | Local infrastructure | Docker Compose for PostgreSQL |
 
-The direct OpenAI SDK is used instead of a heavyweight agent framework. The implemented path is one explicit Structured Output synthesis call after policy-directed evidence collection and deterministic analysis.
+The direct OpenAI SDK is used instead of a heavyweight agent framework. The implemented path uses one bounded function-selection call followed by one Structured Output synthesis call. Deterministic application code executes every read and remains authoritative for the decision.
 
 ## Implemented module boundaries
 
@@ -452,6 +454,7 @@ Each case verifies:
 - [x] Deterministic planning and constraint engine
 - [x] Scenario 1 decision evaluation suite
 - [x] Optional OpenAI structured buyer briefing
+- [x] Bounded dynamic selection of optional read-only investigation tools
 - [x] Buyer attention queue and evidence review experience
 - [x] Versioned approval and live-data revalidation
 - [x] Idempotent PO execution and exact post-action validation
@@ -459,11 +462,11 @@ Each case verifies:
 - [x] Memory and PostgreSQL repository adapters
 - [x] Setup, architecture, evaluation, and demo guidance
 
-The next milestone will generalise the event handler for Scenarios 2–4, introduce alternate-supplier/transfer candidate generation, persist generated briefings, and add browser-level CI tests.
+The next milestone will reuse the investigation-tool registry for Scenario 2 supplier-shortfall resolution, including alternate-supplier/transfer candidate generation, then generalise the event handler for Scenarios 3–4.
 
 ## Current status
 
-Scenario 1 is executable end to end. The production build passes, 18 automated tests pass, all eight standalone decision evaluations pass, and PostgreSQL migration/seed/write/read-back have been smoke-tested locally.
+Scenario 1 is executable end to end. The production build passes, 22 automated tests pass, all eight standalone decision evaluations pass, the live OpenAI tool-selection path has been exercised, and PostgreSQL migration/seed/write/read-back have been smoke-tested locally.
 
 Memory mode is deliberately available for a reliable interview demo. PostgreSQL mode demonstrates the persistence boundary used in a deployed service.
 

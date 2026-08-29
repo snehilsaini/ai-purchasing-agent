@@ -5,7 +5,7 @@ import { FIXTURE_AS_OF, scenarioOneBaseFixture } from "@/evaluation/fixtures";
 import { createPurchasingCase } from "@/workflows/demo-cases";
 
 describe("purchasing agent briefing", () => {
-  it("runs every required read-only evidence tool and falls back without an API key", async () => {
+  it("runs every mandatory read plus bounded policy-selected tools without an API key", async () => {
     const purchasingCase = createPurchasingCase({
       id: "CASE-BRIEFING",
       evidence: scenarioOneBaseFixture(),
@@ -18,7 +18,7 @@ describe("purchasing agent briefing", () => {
     });
 
     expect(briefing.mode).toBe("DETERMINISTIC_FALLBACK");
-    expect(briefing.investigationTrace.map((item) => item.tool)).toEqual([
+    expect(briefing.investigationTrace.slice(0, 8).map((item) => item.tool)).toEqual([
       "get_recommendation",
       "get_inventory_position",
       "get_demand_forecast",
@@ -28,6 +28,14 @@ describe("purchasing agent briefing", () => {
       "get_storage_capacity",
       "get_product_policy",
     ]);
+    expect(briefing.investigationTrace.slice(0, 8).every((item) => item.selection === "MANDATORY")).toBe(true);
+    expect(briefing.investigationTrace.slice(8).map((item) => item.tool)).toEqual([
+      "inspect_demand_curve",
+      "inspect_inbound_schedule",
+      "inspect_perishability_exposure",
+    ]);
+    expect(briefing.investigationTrace.slice(8).every((item) => item.selection === "POLICY_SELECTED")).toBe(true);
+    expect(briefing.rejectedToolCalls).toEqual([]);
     expect(briefing.buyerAction).toContain("450 units");
   });
 });

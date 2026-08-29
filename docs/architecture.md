@@ -16,17 +16,20 @@ flowchart LR
     ANALYZE --> PLAN[Deterministic planner]
     PLAN --> RULES[Constraint engine]
     API --> AGENT[Buyer briefing generator]
-    AGENT --> READ[Eight required evidence views]
-    AGENT --> LLM[Optional OpenAI Responses API]
+    AGENT --> READ[Eight mandatory evidence views]
+    AGENT --> LLM[Optional OpenAI tool selection]
+    LLM --> OPT[Four approved optional read tools]
+    OPT --> AGENT
+    AGENT --> BRIEF[Structured briefing synthesis]
 ```
 
 The important dependency direction is inward: Next.js and database adapters depend on the workflow/domain layers. Replenishment rules do not depend on UI, HTTP, PostgreSQL, or an LLM.
 
 ## Evidence and tool model
 
-Scenario 1 uses a policy-defined set of eight required read-only evidence views: recommendation, inventory, demand, open POs, supplier terms, budget, storage, and product policy. In the current vertical slice these views read versioned evidence from the case aggregate; they are logical integration boundaries rather than independently deployed network services.
+Scenario 1 uses a policy-defined set of eight mandatory read-only evidence views: recommendation, inventory, demand, open POs, supplier terms, budget, storage, and product policy. In the current vertical slice these views read versioned evidence from the case aggregate; they are logical integration boundaries rather than independently deployed network services.
 
-The application, not the model, runs the required reads. OpenAI receives their trace plus the completed deterministic analysis and produces only a structured buyer briefing. This fixed approach ensures the model cannot skip safety-critical evidence. Future scenarios can introduce bounded dynamic selection for optional tools while retaining a deterministic minimum-evidence gate.
+The application, not the model, runs those mandatory reads. OpenAI can then select up to four approved optional views: demand curve, inbound schedule, supplier risk, and perishability exposure. Each request must contain the exact case ID and a rationale. The application parses and validates arguments, deduplicates calls, rejects unknown tools, enforces the limit, executes only local read functions, and records provenance in the trace. With no OpenAI key, deterministic case-signal rules select from the same optional registry.
 
 ## Scenario 1 execution sequence
 
@@ -75,13 +78,13 @@ Application code owns:
 
 ### LLM boundary
 
-The optional model receives:
+The optional model receives a compact set of case signals for tool selection, then:
 
-- results from eight named read-only evidence adapters;
+- results from eight mandatory and zero-to-four dynamically selected read-only adapters;
 - the already-computed deterministic plan and decision;
 - the exact proposal metadata.
 
-It returns a Zod-validated Structured Output containing a concise buyer briefing. The prompt explicitly forbids recalculating or changing the action. It has no purchase-order write tool and its output never bypasses workflow policy.
+It returns a Zod-validated Structured Output containing a concise buyer briefing. The prompt explicitly forbids recalculating or changing the action. The registry contains no purchase-order write tool, tool arguments are runtime-validated, and model output never bypasses workflow policy.
 
 ### Human boundary
 
@@ -113,6 +116,7 @@ PostgreSQL rows carry a monotonically increasing `revision`. Mutations use optim
 | Created PO differs from approved action | `RECOVERY_REQUIRED` |
 | Supplier confirms fewer units | `SUPPLIER_SHORTFALL_REPORTED` recovery event |
 | OpenAI key/API/schema unavailable | Deterministic briefing fallback; decision unaffected |
+| Unknown, malformed, duplicate, or excessive model tool call | Call rejected and reported in the investigation trace |
 
 ## Extending Scenarios 2–4
 

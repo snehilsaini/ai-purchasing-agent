@@ -199,7 +199,30 @@ export function CaseDetail({
                 <div className="agent-briefing">
                   <strong>{briefing.headline}</strong>
                   <p>{briefing.executiveSummary}</p>
-                  <span>{briefing.investigationTrace.length} read-only tools · structured output</span>
+                  <span>
+                    {briefing.investigationTrace.filter((item) => item.selection === "MANDATORY").length} mandatory · {briefing.investigationTrace.filter((item) => item.selection !== "MANDATORY").length} selected · structured output
+                  </span>
+                  <details className="investigation-trace">
+                    <summary>View investigation trace</summary>
+                    <div>
+                      {briefing.investigationTrace.map((item) => (
+                        <article key={`${item.selection}-${item.tool}`}>
+                          <header>
+                            <code>{item.tool}</code>
+                            <em className={item.selection.toLowerCase()}>{item.selection.replace("_", " ")}</em>
+                          </header>
+                          <p>{item.rationale}</p>
+                          <small>{item.source.replaceAll("-", " ")} · {formatTime(item.observedAt)}</small>
+                        </article>
+                      ))}
+                      {briefing.rejectedToolCalls.map((rejection) => (
+                        <article className="rejected-tool" key={rejection}>
+                          <header><code>Rejected call</code><em>GUARDRAIL</em></header>
+                          <p>{rejection}</p>
+                        </article>
+                      ))}
+                    </div>
+                  </details>
                 </div>
               )}
               <ul className="factor-list">

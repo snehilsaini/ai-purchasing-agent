@@ -120,7 +120,7 @@ The same `CaseRepository` interface isolates the workflow from the selected stor
 
 OpenAI is the only optional third-party runtime service. The server reads `OPENAI_API_KEY` and `OPENAI_MODEL`; credentials are never sent to the browser.
 
-The application sends the already-collected evidence trace and deterministic result to the Responses API for structured buyer-facing synthesis. The model has no PO write capability. If the key is absent or the request/schema fails, the endpoint returns a deterministic fallback.
+The application first sends compact case signals and four read-only function definitions to the Responses API. It validates and locally executes the selected functions, then sends the resulting trace plus deterministic result for structured buyer-facing synthesis. The model has no PO write capability. If the key is absent, deterministic policy selects optional reads; if the request/schema fails, the endpoint returns a deterministic fallback.
 
 ## Failure simulations
 

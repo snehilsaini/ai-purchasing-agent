@@ -21,6 +21,8 @@ Point out the source/timestamp on every evidence card, the arithmetic strip, dai
 
 Click **Generate** under **AI buyer briefing**.
 
+Expand **View investigation trace**. Point out that eight mandatory policy reads always run, while the optional entries are labelled either `MODEL SELECTED` with OpenAI configured or `POLICY SELECTED` in no-key mode. Each optional read shows the case-specific rationale and source; the model has no write tool.
+
 Without an API key, it labels itself `deterministic fallback`. With a key, it uses a Zod-validated OpenAI Structured Output. In both modes the trace shows eight read-only tools. The model can explain the signed result but cannot calculate or execute the PO.
 
 ## 3. Demonstrate delayed-approval safety
