@@ -1,10 +1,10 @@
 # AI Purchasing Agent
 
-> Working Scenario 1 vertical slice - v0.2
+> Working Scenario 1 + Scenario 2 vertical slices - v0.3
 
 An explainable, constraint-aware purchasing agent for retail and quick-commerce operations. The system reviews purchasing recommendations, gathers operational evidence, makes a decision, executes an authorised action, and validates the real outcome.
 
-Scenario 1 is implemented as a complete vertical slice: attention queue, evidence inspection, deterministic replenishment math, constraint checks, `ACCEPT` / `MODIFY` / `REJECT` / `INVESTIGATE_FURTHER` decisions, versioned approval, live-data revalidation, idempotent mock purchase-order creation, exact approved-payload validation, and supplier-shortfall recovery.
+Scenario 1 reviews an upstream purchase recommendation end to end. Scenario 2 consumes a supplier shortfall, evaluates alternate suppliers and network transfers, ranks feasible recovery actions, obtains versioned approval, revalidates live availability, executes idempotently, and verifies the exact recovery outcome.
 
 The original design baseline remains visible in the first Git commit. This README now describes the working implementation.
 
@@ -52,7 +52,7 @@ OPENAI_API_KEY=your_key_here
 OPENAI_MODEL=gpt-5.4-mini
 ```
 
-The implementation uses the OpenAI Responses API with function calling and Structured Outputs. Eight policy-mandated evidence reads always run; the model may additionally choose from four approved read-only analytical tools. Application code validates the case ID and arguments, rejects unknown/duplicate/over-limit calls, and exposes the complete trace in the UI. A second model call explains the deterministic result but cannot alter calculations or authorise/execute spend. Without a key—or if API/schema validation fails—the same optional tools are selected by deterministic policy and the UI clearly identifies fallback mode. See the official [Responses API documentation](https://developers.openai.com/api/reference/cli/resources/responses/methods/create).
+The implementation uses the OpenAI Responses API with function calling and Structured Outputs. Eight Scenario 1 evidence reads always run; Scenario 2 adds two mandatory recovery reads. The read-only registry contains seven tools, but the model sees only the event-appropriate subset—four for purchase review or three for shortfall recovery—and may make at most four calls. Application code validates the case ID and arguments, rejects unknown/duplicate/over-limit calls, and exposes the complete trace in the UI. A second model call explains the deterministic result but cannot alter calculations or authorise/execute spend. Without a key—or if API/schema validation fails—the same optional tools are selected by deterministic policy and the UI clearly identifies fallback mode. See the official [Responses API documentation](https://developers.openai.com/api/reference/cli/resources/responses/methods/create).
 
 ### Verification
 
@@ -139,7 +139,7 @@ The system records evidence, calculations, decisions, approvals, action attempts
 
 ## Scenario 1 - Recommendation review
 
-Scenario 1 is implemented completely before broadening the system. It uses reusable domain concepts and workflow stages so that the remaining scenarios can be added without redesigning the application.
+Scenario 1 is the originating recommendation-review flow. Its domain concepts and workflow stages are reused directly by the implemented Scenario 2 recovery flow.
 
 ### Inputs required by the assignment
 
@@ -161,7 +161,7 @@ Scenario 1 is implemented completely before broadening the system. It uses reusa
 - shelf life and expiry risk;
 - timestamps and versions for all volatile information.
 
-Future scenario handlers can add historical forecast error, promotions, recent sales velocity, alternate suppliers, inter-node transfers, price breaks, freight, and category-specific receiving constraints.
+Future scenario handlers can add historical forecast error, promotions, recent sales velocity, price breaks, freight, and category-specific receiving constraints. Scenario 2 already adds alternate suppliers and inter-node transfers.
 
 ### Simplified purchasing calculation
 
@@ -312,7 +312,15 @@ Validation occurs at three levels.
 - full confirmation keeps the case completed;
 - partial confirmation moves the case to recovery and records the shortfall.
 
-If a supplier confirms only 300 of an approved 450 units, the validator records a `SUPPLIER_SHORTFALL_REPORTED` recovery event rather than hiding the discrepancy behind a successful PO creation. Alternate sourcing and coverage recalculation are intentionally deferred to the Scenario 2 handler.
+If a supplier confirms only 300 of an approved 450 units, the validator records a `SUPPLIER_SHORTFALL_REPORTED` event rather than hiding the discrepancy behind a successful PO creation. The Scenario 2 handler immediately gathers two alternate suppliers and two transfer sources, creates supplier-only, transfer-only, and split candidates, and applies full-coverage, capacity, MOQ, order-multiple, remaining-budget, arrival-date, and service-risk rules.
+
+## Scenario 2 - Supplier shortfall recovery
+
+The default 150-unit shortfall produces six candidates. Deterministic ranking recommends a 150-unit transfer from `HUB-BLR-11`: it covers the full gap, arrives by the required date, costs INR 1,800, and has 4% service risk. Supplier-only options are blocked when emergency spend exceeds the INR 16,000 remaining budget or delivery misses the deadline; a 100-unit transfer is blocked because it leaves 50 units uncovered.
+
+The selected recovery action becomes a separate, versioned proposal. Immediately before execution the application recalculates all candidates from current recovery evidence. If Marathahalli inventory falls to zero, proposal v1 is stopped and replaced by a split proposal: 100 units from `HUB-BLR-03` plus 50 units from `SUP-SWIFT`. It cannot execute until the buyer approves v2.
+
+Successful recovery creates an idempotent execution record and validates exact transfer/supplier allocations, quantities, costs, and arrival dates against the approved fingerprint.
 
 ## Extensibility across the four scenarios
 
@@ -370,7 +378,7 @@ flowchart LR
     API --> AGENT[Buyer briefing generator]
     AGENT --> LLM[Optional OpenAI tool selection + briefing]
     AGENT --> REQUIRED[Eight mandatory evidence views]
-    LLM --> OPTIONAL[Four bounded optional read tools]
+    LLM --> OPTIONAL[Seven approved read tools; max four calls]
     REQUIRED --> SERVICES[Versioned mock operational evidence]
     OPTIONAL --> SERVICES
     WF --> PLAN[Planning engine]
@@ -435,6 +443,15 @@ Scenario 1 evaluation and workflow tests cover:
 9. prevent duplicate PO creation during retries;
 10. enter recovery when the supplier confirms less than requested.
 
+Scenario 2 evaluation and workflow tests additionally cover:
+
+1. rank a full, low-risk transfer ahead of expensive emergency supply;
+2. reject under-covered, late, capacity-invalid, and over-budget options;
+3. switch to a split transfer/supplier strategy when preferred stock disappears;
+4. escalate when no candidate is feasible;
+5. supersede stale recovery approval and require a new proposal version;
+6. execute and validate the approved recovery exactly once.
+
 Each case verifies:
 
 - the required information was obtained;
@@ -459,14 +476,17 @@ Each case verifies:
 - [x] Versioned approval and live-data revalidation
 - [x] Idempotent PO execution and exact post-action validation
 - [x] Supplier-shortfall recovery transition
+- [x] Scenario 2 alternate-supplier, transfer, and split candidate generation
+- [x] Deterministic recovery feasibility and cost-risk ranking
+- [x] Recovery approval, live revalidation, idempotent execution, and exact validation
 - [x] Memory and PostgreSQL repository adapters
 - [x] Setup, architecture, evaluation, and demo guidance
 
-The next milestone will reuse the investigation-tool registry for Scenario 2 supplier-shortfall resolution, including alternate-supplier/transfer candidate generation, then generalise the event handler for Scenarios 3–4.
+The next milestone is submission hardening and demo rehearsal, followed—only if useful—by a focused Scenario 3 demand-anomaly handler.
 
 ## Current status
 
-Scenario 1 is executable end to end. The production build passes, 22 automated tests pass, all eight standalone decision evaluations pass, the live OpenAI tool-selection path has been exercised, and PostgreSQL migration/seed/write/read-back have been smoke-tested locally.
+Scenarios 1 and 2 are executable end to end. The production build passes, 32 automated tests pass, all 11 standalone decision/recovery evaluations pass, and PostgreSQL migration/seed/Scenario 1/Scenario 2 read-back has been smoke-tested locally. Live OpenAI tool selection and structured briefings have been verified for both scenarios.
 
 Memory mode is deliberately available for a reliable interview demo. PostgreSQL mode demonstrates the persistence boundary used in a deployed service.
 
@@ -481,4 +501,4 @@ Memory mode is deliberately available for a reliable interview demo. PostgreSQL 
 
 ## Design status
 
-This README is intentionally versioned through Git history. Commit 1 is the pre-code design baseline; the current version records which assumptions survived implementation and which trade-offs were made for a focused Scenario 1 slice.
+This README is intentionally versioned through Git history. Commit 1 is the pre-code design baseline; the current version records how the Scenario 1 foundation was reused for the Scenario 2 recovery slice.

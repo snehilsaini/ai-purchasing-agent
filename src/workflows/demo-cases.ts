@@ -77,6 +77,7 @@ export function createPurchasingCase(input: {
     proposal,
     approvedProposalVersion: null,
     purchaseOrder: null,
+    recovery: null,
     timeline: [
       timelineEvent(
         createdAt,

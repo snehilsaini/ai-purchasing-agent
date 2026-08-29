@@ -2,7 +2,7 @@
 
 ## Objective
 
-The project implements Scenario 1 as a complete vertical slice: receive a purchase recommendation, investigate the operational position, return an `ACCEPT`, `MODIFY`, `REJECT`, or `INVESTIGATE_FURTHER` decision, obtain human approval for spend, execute an action, and validate the outcome.
+The project implements two connected vertical slices. Scenario 1 challenges a purchase recommendation, obtains approval, executes a PO, and validates supplier response. Scenario 2 treats a partial supplier confirmation as a new event, evaluates alternate supply and transfers, proposes an exact recovery allocation, obtains fresh approval, revalidates, executes, and verifies recovery.
 
 The upstream recommendation is treated as an input to challenge, not as a trusted answer. The core design goal is an explainable and reliable purchasing workflow rather than a chatbot that produces purchasing prose.
 
@@ -16,18 +16,18 @@ Implemented:
 - deterministic replenishment calculations and operational constraints;
 - buyer approval, approval-time revalidation, and idempotent mock PO creation;
 - exact approved-payload validation and supplier-shortfall recovery;
+- Scenario 2 alternate-supplier, hub-transfer, and split recovery resolution;
+- deterministic recovery feasibility and cost-risk ranking;
+- separate versioned recovery approval, revalidation, idempotency, and validation;
 - optional OpenAI-generated buyer briefings;
 - memory and PostgreSQL persistence modes;
 - decision evaluations, workflow tests, and a repeatable demonstration.
 
 Not implemented as complete workflows:
 
-- Scenario 2 alternate-supplier or split-order resolution;
 - Scenario 3 demand-anomaly handling;
 - Scenario 4 general constraint-resolution strategies;
 - integration with production inventory, forecasting, supplier, finance, or PO systems.
-
-The Scenario 1 supplier-shortfall demonstration emits the recovery state that a future Scenario 2 handler would consume.
 
 ## Product experience
 
@@ -41,6 +41,7 @@ The buyer works from an attention queue. Selecting a case reveals:
 6. important factors and an optional AI briefing;
 7. the exact versioned action awaiting approval;
 8. execution, validation, and recovery events.
+9. Scenario 2 recovery candidates, rejected-option reasons, and exact recovery proposal.
 
 This keeps the human responsible for material spending while removing the need to manually reconstruct the purchasing position or copy an approved action into another screen.
 
@@ -61,7 +62,7 @@ Scenario 1 has a policy-defined minimum evidence set. The application reads all 
 
 Every evidence envelope includes `source`, `observedAt`, `maxAgeMinutes`, and `version`. Invalid or stale critical evidence produces `INVESTIGATE_FURTHER`; the application does not invent a replacement value.
 
-The current vertical slice uses **policy-directed fixed evidence collection**. The OpenAI model does not dynamically select these tools. It receives their results only after the application has collected and validated them. A bounded hybrid tool-selection model is a future extension: required evidence would remain mandatory while the model could request optional reads such as alternate suppliers, transfers, promotions, or recent sales velocity.
+The application always runs the policy-required evidence reads. OpenAI may then dynamically choose up to four approved optional reads. Scenario 1 optional tools inspect demand shape, inbound timing, supplier risk, and perishability. Scenario 2 adds alternate suppliers, network transfers, and deterministic recovery candidates. Unknown, malformed, duplicate, event-inapplicable, or over-limit calls are rejected and recorded.
 
 ## Deterministic decision model
 
@@ -114,8 +115,8 @@ The original 800-unit recommendation therefore becomes a `MODIFY` decision for 4
 
 OpenAI is optional. When configured, the model receives:
 
-- a compact case summary and four approved function definitions for bounded optional tool selection;
-- the eight mandatory evidence results plus validated optional tool results;
+- a compact case summary and the event-specific allow-list: four purchase-review definitions or three recovery definitions;
+- eight mandatory Scenario 1 results, two additional mandatory recovery results when applicable, and validated optional results;
 - the deterministic plan and decision;
 - the exact proposal metadata.
 
@@ -150,7 +151,7 @@ The supplier-confirmation step closes the feedback loop:
 - partial confirmation changes the PO to `PARTIALLY_CONFIRMED` and moves the case to `RECOVERY_REQUIRED`;
 - the audit timeline records the confirmed quantity and shortfall.
 
-This is intentionally a mock-level feedback loop. A production implementation would also recalculate coverage using the confirmed delivery date, reserve budget and capacity through their source systems, and dispatch the shortfall to alternate-supplier, transfer, or escalation policies.
+For a partial confirmation, Scenario 2 evaluates supplier-only, transfer-only, and split allocations. Candidate feasibility requires complete coverage, capacity and order-rule compliance, remaining budget, and arrival by the original required date. Feasible candidates are ranked by landed cost, reliability-derived service risk, and overage. Approval-time recalculation supersedes an allocation if availability or any material field changes. The mock executor records and exactly validates the final recovery allocations.
 
 ## Persistence and reliability
 
@@ -188,7 +189,7 @@ The case lifecycle, repositories, evidence envelopes, proposal versioning, appro
 ## Deliberate trade-offs
 
 - A modular monolith keeps the assignment understandable and runnable in one process while preserving service boundaries.
-- Fixed required evidence is more reliable for the implemented scenario than unrestricted LLM tool selection.
+- Fixed required evidence plus bounded optional model selection is more reliable than unrestricted LLM tool use.
 - Deterministic purchasing math makes evaluations reproducible and prevents model drift from changing spend.
 - JSONB aggregate persistence keeps the interview slice compact; a production system could normalize action, approval, and audit ledgers.
 - Mock operational data makes the feedback loop demonstrable without requiring company credentials or infrastructure.

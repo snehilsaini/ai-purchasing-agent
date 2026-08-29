@@ -80,6 +80,27 @@ export const productPolicySchema = z.object({
   maxOrderUnitsBeforeExpiry: z.number().int().nonnegative().optional(),
 });
 
+export const alternateSupplierSchema = z.object({
+  supplierId: z.string(),
+  supplierName: z.string(),
+  leadTimeDays: z.number().int().nonnegative(),
+  minimumOrderQuantity: z.number().int().positive(),
+  orderMultiple: z.number().int().positive(),
+  unitCost: z.number().positive(),
+  currency: z.string(),
+  availableCapacityUnits: z.number().int().nonnegative(),
+  deliveryReliability: z.number().min(0).max(1),
+});
+
+export const transferOptionSchema = z.object({
+  sourceNodeId: z.string(),
+  sourceNodeName: z.string(),
+  availableUnits: z.number().int().nonnegative(),
+  transferLeadTimeDays: z.number().int().nonnegative(),
+  transferCostPerUnit: z.number().nonnegative(),
+  transferReliability: z.number().min(0).max(1),
+});
+
 export const evidenceEnvelopeSchema = <T extends z.ZodType>(schema: T) =>
   z.object({
     value: schema,
@@ -100,6 +121,11 @@ export const scenarioOneEvidenceSchema = z.object({
   productPolicy: evidenceEnvelopeSchema(productPolicySchema),
 });
 
+export const supplierShortfallEvidenceSchema = z.object({
+  alternateSuppliers: evidenceEnvelopeSchema(z.array(alternateSupplierSchema)),
+  transferOptions: evidenceEnvelopeSchema(z.array(transferOptionSchema)),
+});
+
 export type Decision = z.infer<typeof decisionSchema>;
 export type CaseStatus = z.infer<typeof caseStatusSchema>;
 export type Recommendation = z.infer<typeof recommendationSchema>;
@@ -111,6 +137,9 @@ export type Budget = z.infer<typeof budgetSchema>;
 export type Storage = z.infer<typeof storageSchema>;
 export type ProductPolicy = z.infer<typeof productPolicySchema>;
 export type ScenarioOneEvidence = z.infer<typeof scenarioOneEvidenceSchema>;
+export type AlternateSupplier = z.infer<typeof alternateSupplierSchema>;
+export type TransferOption = z.infer<typeof transferOptionSchema>;
+export type SupplierShortfallEvidence = z.infer<typeof supplierShortfallEvidenceSchema>;
 
 export type EvidenceKey = keyof ScenarioOneEvidence;
 
@@ -206,7 +235,14 @@ export interface TimelineEvent {
     | "REVALIDATION_FAILED"
     | "ACTION_EXECUTED"
     | "OUTCOME_VALIDATED"
-    | "RECOVERY_CREATED";
+    | "RECOVERY_CREATED"
+    | "RECOVERY_EVIDENCE_GATHERED"
+    | "RECOVERY_DECISION_RECORDED"
+    | "RECOVERY_APPROVAL_RECORDED"
+    | "RECOVERY_REVALIDATION_PASSED"
+    | "RECOVERY_REVALIDATION_FAILED"
+    | "RECOVERY_ACTION_EXECUTED"
+    | "RECOVERY_OUTCOME_VALIDATED";
   at: string;
   title: string;
   detail: string;
@@ -223,9 +259,95 @@ export interface PurchaseOrderRecord {
   confirmedDeliveryDate: string | null;
 }
 
+export interface RecoverySupplierAllocation {
+  supplierId: string;
+  quantity: number;
+  unitCost: number;
+  currency: string;
+  expectedDeliveryDate: string;
+}
+
+export interface RecoveryTransferAllocation {
+  sourceNodeId: string;
+  destinationNodeId: string;
+  quantity: number;
+  transferCostPerUnit: number;
+  expectedArrivalDate: string;
+}
+
+export interface RecoverSupplierShortfallAction {
+  type: "RECOVER_SUPPLIER_SHORTFALL";
+  productId: string;
+  destinationNodeId: string;
+  shortfallUnits: number;
+  supplierOrders: RecoverySupplierAllocation[];
+  transfers: RecoveryTransferAllocation[];
+  coveredUnits: number;
+  totalCost: number;
+  currency: string;
+  latestArrivalDate: string;
+}
+
+export interface RecoveryCandidate {
+  candidateId: string;
+  strategy: "ALTERNATE_SUPPLIER" | "INVENTORY_TRANSFER" | "SPLIT";
+  label: string;
+  feasible: boolean;
+  coveredUnits: number;
+  uncoveredUnits: number;
+  totalCost: number;
+  currency: string;
+  latestArrivalDate: string;
+  serviceRisk: number;
+  score: number | null;
+  constraints: string[];
+  action: RecoverSupplierShortfallAction | null;
+}
+
+export interface SupplierShortfallAnalysis {
+  calculatedAt: string;
+  requestedUnits: number;
+  confirmedUnits: number;
+  shortfallUnits: number;
+  requiredByDate: string;
+  remainingBudget: number;
+  currency: string;
+  candidates: RecoveryCandidate[];
+  recommendedCandidateId: string | null;
+  summary: string;
+}
+
+export interface RecoveryActionProposal {
+  proposalId: string;
+  version: number;
+  createdAt: string;
+  validUntil: string;
+  evidenceVersions: Record<keyof SupplierShortfallEvidence, string>;
+  action: RecoverSupplierShortfallAction;
+  actionFingerprint: string;
+  idempotencyKey: string;
+}
+
+export interface RecoveryExecutionRecord {
+  executionId: string;
+  idempotencyKey: string;
+  createdAt: string;
+  action: RecoverSupplierShortfallAction;
+  status: "COMPLETED";
+}
+
+export interface SupplierShortfallRecovery {
+  status: "INVESTIGATING" | "AWAITING_APPROVAL" | "REVALIDATING" | "EXECUTING" | "COMPLETED" | "ESCALATED";
+  evidence: SupplierShortfallEvidence;
+  analysis: SupplierShortfallAnalysis;
+  proposal: RecoveryActionProposal | null;
+  approvedProposalVersion: number | null;
+  execution: RecoveryExecutionRecord | null;
+}
+
 export interface PurchasingCase {
   id: string;
-  eventType: "PURCHASE_RECOMMENDATION_CREATED";
+  eventType: "PURCHASE_RECOMMENDATION_CREATED" | "SUPPLIER_SHORTFALL_REPORTED";
   status: CaseStatus;
   priority: "HIGH" | "MEDIUM" | "LOW";
   createdAt: string;
@@ -235,5 +357,6 @@ export interface PurchasingCase {
   proposal: ActionProposal | null;
   approvedProposalVersion: number | null;
   purchaseOrder: PurchaseOrderRecord | null;
+  recovery: SupplierShortfallRecovery | null;
   timeline: TimelineEvent[];
 }

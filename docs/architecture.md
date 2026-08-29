@@ -18,7 +18,7 @@ flowchart LR
     API --> AGENT[Buyer briefing generator]
     AGENT --> READ[Eight mandatory evidence views]
     AGENT --> LLM[Optional OpenAI tool selection]
-    LLM --> OPT[Four approved optional read tools]
+    LLM --> OPT[Seven approved optional read tools; max four calls]
     OPT --> AGENT
     AGENT --> BRIEF[Structured briefing synthesis]
 ```
@@ -29,7 +29,7 @@ The important dependency direction is inward: Next.js and database adapters depe
 
 Scenario 1 uses a policy-defined set of eight mandatory read-only evidence views: recommendation, inventory, demand, open POs, supplier terms, budget, storage, and product policy. In the current vertical slice these views read versioned evidence from the case aggregate; they are logical integration boundaries rather than independently deployed network services.
 
-The application, not the model, runs those mandatory reads. OpenAI can then select up to four approved optional views: demand curve, inbound schedule, supplier risk, and perishability exposure. Each request must contain the exact case ID and a rationale. The application parses and validates arguments, deduplicates calls, rejects unknown tools, enforces the limit, executes only local read functions, and records provenance in the trace. With no OpenAI key, deterministic case-signal rules select from the same optional registry.
+The application, not the model, runs those mandatory reads. Scenario 2 adds mandatory supplier-confirmation and recovery-budget/deadline reads. The registry contains seven approved optional views, but only an event-specific subset is exposed: four purchase-review tools or three recovery tools. Each request must contain the exact case ID and a rationale. The application validates arguments and event applicability, deduplicates calls, rejects unknown tools, enforces a four-call limit, executes only local read functions, and records provenance in the trace. With no OpenAI key, deterministic case-signal rules select from the same registry.
 
 ## Scenario 1 execution sequence
 
@@ -63,6 +63,32 @@ sequenceDiagram
     end
 ```
 
+## Scenario 2 recovery sequence
+
+```mermaid
+sequenceDiagram
+    participant S as Supplier
+    participant W as Purchasing workflow
+    participant R as Recovery planner
+    participant B as Buyer
+    participant X as Recovery executor
+
+    S->>W: Confirm 300 of 450 units
+    W->>R: Evaluate suppliers, transfers, and splits
+    R-->>W: Six candidates + recommended 150-unit transfer
+    W-->>B: Recovery proposal v1
+    B->>W: Approve exact allocation
+    W->>R: Recalculate from current availability
+    alt Preferred hub stock changed
+        R-->>W: New 100 transfer + 50 supplier split
+        W-->>B: Supersede v1; request approval for v2
+    else Allocation unchanged
+        W->>X: Execute with recovery idempotency key
+        X-->>W: Recovery execution record
+        W-->>B: Exact allocations validated; recovery complete
+    end
+```
+
 ## Trust boundaries
 
 ### Deterministic application
@@ -80,7 +106,7 @@ Application code owns:
 
 The optional model receives a compact set of case signals for tool selection, then:
 
-- results from eight mandatory and zero-to-four dynamically selected read-only adapters;
+- results from eight Scenario 1 mandatory reads, two additional recovery reads when applicable, and zero-to-four dynamically selected adapters;
 - the already-computed deterministic plan and decision;
 - the exact proposal metadata.
 
@@ -115,16 +141,17 @@ PostgreSQL rows carry a monotonically increasing `revision`. Mutations use optim
 | Approval retry or double-click | Same idempotency key; same PO returned |
 | Created PO differs from approved action | `RECOVERY_REQUIRED` |
 | Supplier confirms fewer units | `SUPPLIER_SHORTFALL_REPORTED` recovery event |
+| Preferred recovery source changes after approval | Old recovery proposal superseded; new candidate ranking and approval required |
+| No recovery candidate covers the shortfall safely | `ESCALATED`; no recovery execution |
 | OpenAI key/API/schema unavailable | Deterministic briefing fallback; decision unaffected |
 | Unknown, malformed, duplicate, or excessive model tool call | Call rejected and reported in the investigation trace |
 
-## Extending Scenarios 2–4
+## Extending Scenarios 3–4
 
 New scenarios should implement an event handler that declares required evidence, candidate actions, and validation criteria. They reuse the same case lifecycle, repositories, evidence envelopes, approval policy, proposal versioning, executor, timeline, and recovery semantics.
 
 Likely additions are:
 
-- Scenario 2: alternate supplier, transfer, and split-order candidate generation;
 - Scenario 3: demand-anomaly evidence and forecast override policy;
 - Scenario 4: constraint-collision resolution and explicit infeasibility explanations.
 

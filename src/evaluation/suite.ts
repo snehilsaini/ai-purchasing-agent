@@ -1,5 +1,12 @@
-import type { Decision, ScenarioOneEvidence } from "@/domain/purchasing";
+import type {
+  Decision,
+  PurchasingCase,
+  ScenarioOneEvidence,
+  SupplierShortfallEvidence,
+} from "@/domain/purchasing";
 import { FIXTURE_AS_OF, scenarioOneBaseFixture, withEvidence } from "@/evaluation/fixtures";
+import { createPurchasingCase } from "@/workflows/demo-cases";
+import { supplierShortfallFixture } from "@/workflows/supplier-shortfall-fixtures";
 
 export interface DecisionEvaluationCase {
   name: string;
@@ -88,6 +95,68 @@ export function scenarioOneEvaluationSuite(): DecisionEvaluationCase[] {
       expectedQuantity: 400,
     },
   ];
+}
+
+export interface RecoveryEvaluationCase {
+  name: string;
+  evidence: SupplierShortfallEvidence;
+  expectedCandidateId: string | null;
+}
+
+export function scenarioTwoEvaluationSuite(): {
+  purchasingCase: PurchasingCase;
+  evaluations: RecoveryEvaluationCase[];
+} {
+  const purchasingCase = createPurchasingCase({
+    id: "CASE-RECOVERY-EVAL",
+    evidence: scenarioOneBaseFixture(),
+    now: FIXTURE_AS_OF,
+  });
+  purchasingCase.purchaseOrder = {
+    purchaseOrderId: "PO-RECOVERY-EVAL",
+    idempotencyKey: "original-order",
+    createdAt: FIXTURE_AS_OF.toISOString(),
+    status: "PARTIALLY_CONFIRMED",
+    requested: purchasingCase.proposal!.action,
+    confirmedQuantity: 300,
+    confirmedDeliveryDate: purchasingCase.proposal!.action.expectedDeliveryDate,
+  };
+
+  const base = supplierShortfallFixture(FIXTURE_AS_OF);
+  const transferUnavailable = structuredClone(base);
+  transferUnavailable.transferOptions.value[1].availableUnits = 0;
+  const infeasible = structuredClone(base);
+  infeasible.transferOptions.value = infeasible.transferOptions.value.map((option) => ({
+    ...option,
+    availableUnits: 25,
+    transferLeadTimeDays: 5,
+  }));
+  infeasible.alternateSuppliers.value = infeasible.alternateSuppliers.value.map((supplier) => ({
+    ...supplier,
+    leadTimeDays: 5,
+    availableCapacityUnits: 25,
+  }));
+
+  return {
+    purchasingCase,
+    evaluations: [
+      {
+        name: "prefer a full low-risk network transfer",
+        evidence: base,
+        expectedCandidateId: "transfer:HUB-BLR-11",
+      },
+      {
+        name: "switch to split recovery when the preferred hub is unavailable",
+        evidence: transferUnavailable,
+        expectedCandidateId: "split:HUB-BLR-03:SUP-SWIFT",
+      },
+      {
+        name: "escalate when all recovery options are late or under-covered",
+        evidence: infeasible,
+        expectedCandidateId: null,
+      },
+    ],
+  };
 }
 
 export { FIXTURE_AS_OF };

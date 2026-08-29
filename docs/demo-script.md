@@ -23,7 +23,7 @@ Click **Generate** under **AI buyer briefing**.
 
 Expand **View investigation trace**. Point out that eight mandatory policy reads always run, while the optional entries are labelled either `MODEL SELECTED` with OpenAI configured or `POLICY SELECTED` in no-key mode. Each optional read shows the case-specific rationale and source; the model has no write tool.
 
-Without an API key, it labels itself `deterministic fallback`. With a key, it uses a Zod-validated OpenAI Structured Output. In both modes the trace shows eight read-only tools. The model can explain the signed result but cannot calculate or execute the PO.
+Without an API key, it labels itself `deterministic fallback`. With a key, it uses a Zod-validated OpenAI Structured Output. In Scenario 1 the trace shows eight mandatory reads plus selected optional tools. The model can explain the signed result but cannot calculate or execute the PO.
 
 ## 3. Demonstrate delayed-approval safety
 
@@ -50,7 +50,15 @@ Explain that retrying the same request returns the existing PO because the idemp
 
 Click **Confirm 150 short**.
 
-The completed case becomes `RECOVERY_REQUIRED`. The supplier shortfall is not hidden behind a successful PO API response; it becomes a `SUPPLIER_SHORTFALL_REPORTED` event ready for the Scenario 2 handler.
+The case becomes `RECOVERY_REQUIRED` with a `SUPPLIER_SHORTFALL_REPORTED` event. Scenario 2 visibly evaluates six supplier, transfer, and split candidates. Show why the emergency suppliers and 100-unit transfer are blocked, and why the 150-unit Marathahalli transfer is recommended.
+
+Generate the AI briefing again and expand its trace. Scenario 2 adds mandatory supplier-confirmation/budget/deadline reads and can dynamically inspect alternate suppliers, network transfers, and deterministic candidate ranking.
+
+## 6. Demonstrate recovery revalidation
+
+Click **Set transfer stock to zero**, then **Approve recovery v1**. Revalidation stops the old transfer and produces recovery proposal v2: 100 units from `HUB-BLR-03` plus 50 from `SUP-SWIFT`.
+
+Approve recovery v2. The UI records one recovery execution and validates every allocation against the approved recovery fingerprint.
 
 ## Optional reviewer commands
 

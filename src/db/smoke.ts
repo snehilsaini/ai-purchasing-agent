@@ -32,8 +32,29 @@ try {
     throw new Error("The persisted purchase order did not survive a repository read-back.");
   }
 
+  const shortfall = await service.recordSupplierConfirmation({
+    caseId: target.id,
+    confirmedQuantity: 300,
+  });
+  if (shortfall.status !== "RECOVERY_REQUIRED" || !shortfall.recovery?.proposal) {
+    throw new Error("Persistent supplier confirmation did not create a recovery proposal.");
+  }
+  const recovered = await service.approveRecovery({
+    caseId: target.id,
+    proposalVersion: shortfall.recovery.proposal.version,
+    buyerId: "database-smoke-test",
+  });
+  const recoveredReadBack = await service.getCase(target.id);
+  if (
+    recovered.status !== "COMPLETED"
+    || !recovered.recovery?.execution
+    || recoveredReadBack.recovery?.execution?.executionId !== recovered.recovery.execution.executionId
+  ) {
+    throw new Error("Persistent recovery execution did not complete or survive read-back.");
+  }
+
   console.info(
-    `PostgreSQL smoke test passed: ${completed.purchaseOrder.purchaseOrderId} persisted for ${target.id}.`,
+    `PostgreSQL smoke test passed: ${completed.purchaseOrder.purchaseOrderId} and ${recovered.recovery.execution.executionId} persisted for ${target.id}.`,
   );
 } finally {
   await client.end();

@@ -9,10 +9,14 @@ import type { CaseRepository } from "@/repositories/case-repository";
 import { CaseNotFoundError, CaseRevisionConflictError } from "@/repositories/case-repository";
 import {
   createActionProposal,
+  createRecoveryActionProposal,
   describeMaterialChanges,
   fingerprintAction,
+  fingerprintRecoveryAction,
 } from "@/policies/action-proposal";
+import { calculateSupplierShortfallRecovery } from "@/planning/recovery-plan";
 import { analyzeScenarioOne } from "@/workflows/analyze-scenario-one";
+import { supplierShortfallFixture } from "@/workflows/supplier-shortfall-fixtures";
 
 export class WorkflowError extends Error {
   constructor(
@@ -247,6 +251,7 @@ export class PurchasingCaseService {
         if (input.confirmedQuantity < requestedQuantity) {
           current.purchaseOrder.status = "PARTIALLY_CONFIRMED";
           current.status = "RECOVERY_REQUIRED";
+          current.eventType = "SUPPLIER_SHORTFALL_REPORTED";
           current.timeline.push(event(
             now,
             "RECOVERY_CREATED",
@@ -254,6 +259,43 @@ export class PurchasingCaseService {
             `Supplier confirmed ${input.confirmedQuantity} of ${requestedQuantity} units. The ${requestedQuantity - input.confirmedQuantity}-unit shortfall becomes a SUPPLIER_SHORTFALL_REPORTED event.`,
             "SUPPLIER",
           ));
+          const recoveryEvidence = supplierShortfallFixture(now);
+          const recoveryAnalysis = calculateSupplierShortfallRecovery(current, recoveryEvidence, now);
+          const recommended = recoveryAnalysis.candidates.find(
+            (candidate) => candidate.candidateId === recoveryAnalysis.recommendedCandidateId,
+          );
+          const recoveryProposal = recommended?.action
+            ? createRecoveryActionProposal({
+              caseId: current.id,
+              action: recommended.action,
+              evidence: recoveryEvidence,
+              version: 1,
+              now,
+            })
+            : null;
+          current.recovery = {
+            status: recoveryProposal ? "AWAITING_APPROVAL" : "ESCALATED",
+            evidence: recoveryEvidence,
+            analysis: recoveryAnalysis,
+            proposal: recoveryProposal,
+            approvedProposalVersion: null,
+            execution: null,
+          };
+          current.timeline.push(event(
+            now,
+            "RECOVERY_EVIDENCE_GATHERED",
+            "Recovery options investigated",
+            `${recoveryEvidence.alternateSuppliers.value.length} alternate suppliers and ${recoveryEvidence.transferOptions.value.length} hub transfers were evaluated.`,
+            "AGENT",
+          ));
+          current.timeline.push(event(
+            now,
+            "RECOVERY_DECISION_RECORDED",
+            recoveryProposal ? "Recovery proposal prepared" : "Recovery escalated",
+            recoveryAnalysis.summary,
+            "AGENT",
+          ));
+          if (!recoveryProposal) current.status = "ESCALATED";
         } else {
           current.purchaseOrder.status = "CONFIRMED";
           current.status = "COMPLETED";
@@ -263,6 +305,198 @@ export class PurchasingCaseService {
             "Supplier confirmed the full order",
             `${input.confirmedQuantity} units are confirmed for ${current.purchaseOrder.confirmedDeliveryDate}.`,
             "SUPPLIER",
+          ));
+        }
+        current.updatedAt = now.toISOString();
+        return current;
+      });
+    } catch (error) {
+      if (error instanceof WorkflowError) throw error;
+      if (error instanceof CaseNotFoundError) {
+        throw new WorkflowError(error.message, "NOT_FOUND", 404);
+      }
+      if (error instanceof CaseRevisionConflictError) {
+        throw new WorkflowError(error.message, "CONFLICT", 409);
+      }
+      throw error;
+    }
+  }
+
+  async simulateRecoveryAvailabilityChange(input: {
+    caseId: string;
+    sourceNodeId: string;
+    availableUnits: number;
+    now?: Date;
+  }): Promise<PurchasingCase> {
+    const now = input.now ?? new Date();
+    try {
+      return await this.repository.mutate(input.caseId, (current) => {
+        if (!current.recovery) {
+          throw new WorkflowError("This case has no supplier-shortfall recovery.", "INVALID_STATE", 409);
+        }
+        const transfer = current.recovery.evidence.transferOptions.value.find(
+          (option) => option.sourceNodeId === input.sourceNodeId,
+        );
+        if (!transfer) {
+          throw new WorkflowError(`Transfer source ${input.sourceNodeId} was not found.`, "INVALID_REQUEST", 400);
+        }
+        transfer.availableUnits = Math.max(0, input.availableUnits);
+        current.recovery.evidence.transferOptions.observedAt = now.toISOString();
+        current.recovery.evidence.transferOptions.version = [
+          current.recovery.evidence.transferOptions.version,
+          "change",
+          now.getTime(),
+        ].join("-");
+        current.updatedAt = now.toISOString();
+        return current;
+      });
+    } catch (error) {
+      if (error instanceof WorkflowError) throw error;
+      if (error instanceof CaseNotFoundError) {
+        throw new WorkflowError(error.message, "NOT_FOUND", 404);
+      }
+      if (error instanceof CaseRevisionConflictError) {
+        throw new WorkflowError(error.message, "CONFLICT", 409);
+      }
+      throw error;
+    }
+  }
+
+  async approveRecovery(input: {
+    caseId: string;
+    proposalVersion: number;
+    buyerId: string;
+    now?: Date;
+  }): Promise<PurchasingCase> {
+    const now = input.now ?? new Date();
+    try {
+      return await this.repository.mutate(input.caseId, (current) => {
+        const recovery = current.recovery;
+        if (
+          recovery?.status === "COMPLETED"
+          && recovery.approvedProposalVersion === input.proposalVersion
+          && recovery.execution
+        ) {
+          return current;
+        }
+        if (!recovery?.proposal) {
+          throw new WorkflowError("This case has no recovery action awaiting approval.", "INVALID_STATE", 409);
+        }
+        if (recovery.proposal.version !== input.proposalVersion) {
+          throw new WorkflowError(
+            `Recovery proposal v${input.proposalVersion} is no longer current. Review v${recovery.proposal.version} before approving.`,
+            "CONFLICT",
+            409,
+          );
+        }
+        if (current.status !== "RECOVERY_REQUIRED" || recovery.status !== "AWAITING_APPROVAL") {
+          throw new WorkflowError("The recovery case is not awaiting approval.", "INVALID_STATE", 409);
+        }
+
+        const approvedProposal = recovery.proposal;
+        recovery.status = "REVALIDATING";
+        recovery.approvedProposalVersion = approvedProposal.version;
+        current.timeline.push(event(
+          now,
+          "RECOVERY_APPROVAL_RECORDED",
+          `Recovery proposal v${approvedProposal.version} approved`,
+          `${input.buyerId} approved recovery of ${approvedProposal.action.shortfallUnits} shortfall units.`,
+          "BUYER",
+        ));
+
+        const refreshedAnalysis = calculateSupplierShortfallRecovery(
+          current,
+          recovery.evidence,
+          now,
+        );
+        recovery.analysis = refreshedAnalysis;
+        const refreshedCandidate = refreshedAnalysis.candidates.find(
+          (candidate) => candidate.candidateId === refreshedAnalysis.recommendedCandidateId,
+        );
+        const refreshedAction = refreshedCandidate?.action ?? null;
+        const expired = now.getTime() > new Date(approvedProposal.validUntil).getTime();
+        const changed = refreshedAction
+          ? fingerprintRecoveryAction(refreshedAction) !== approvedProposal.actionFingerprint
+          : true;
+
+        if (expired || changed) {
+          const reasons = [];
+          if (expired) reasons.push("The recovery proposal validity window expired before execution.");
+          if (changed) reasons.push("Availability, timing, cost, or the recommended recovery allocation changed.");
+          current.timeline.push(event(
+            now,
+            "RECOVERY_REVALIDATION_FAILED",
+            "Recovery approval stopped by revalidation",
+            reasons.join(" "),
+            "SYSTEM",
+          ));
+          recovery.approvedProposalVersion = null;
+          if (refreshedAction) {
+            recovery.proposal = createRecoveryActionProposal({
+              caseId: current.id,
+              action: refreshedAction,
+              evidence: recovery.evidence,
+              version: approvedProposal.version + 1,
+              now,
+            });
+            recovery.status = "AWAITING_APPROVAL";
+            current.status = "RECOVERY_REQUIRED";
+          } else {
+            recovery.proposal = null;
+            recovery.status = "ESCALATED";
+            current.status = "ESCALATED";
+          }
+          current.updatedAt = now.toISOString();
+          return current;
+        }
+
+        recovery.status = "EXECUTING";
+        current.timeline.push(event(
+          now,
+          "RECOVERY_REVALIDATION_PASSED",
+          "Recovery revalidation passed",
+          "Shortfall, source availability, timing, cost, and selected allocations still match the approved recovery proposal.",
+          "SYSTEM",
+        ));
+        const existingExecution = recovery.execution?.idempotencyKey === approvedProposal.idempotencyKey
+          ? recovery.execution
+          : null;
+        recovery.execution = existingExecution ?? {
+          executionId: `REC-${randomUUID().slice(0, 8).toUpperCase()}`,
+          idempotencyKey: approvedProposal.idempotencyKey,
+          createdAt: now.toISOString(),
+          action: approvedProposal.action,
+          status: "COMPLETED",
+        };
+        current.timeline.push(event(
+          now,
+          "RECOVERY_ACTION_EXECUTED",
+          existingExecution ? "Existing recovery execution reused" : "Recovery action executed",
+          `${recovery.execution.executionId} covers ${recovery.execution.action.coveredUnits} units through ${recovery.execution.action.transfers.length} transfer(s) and ${recovery.execution.action.supplierOrders.length} supplier order(s).`,
+          "SYSTEM",
+        ));
+
+        const exactMatch = fingerprintRecoveryAction(recovery.execution.action)
+          === approvedProposal.actionFingerprint;
+        if (!exactMatch) {
+          recovery.status = "ESCALATED";
+          current.status = "ESCALATED";
+          current.timeline.push(event(
+            now,
+            "RECOVERY_CREATED",
+            "Recovery execution validation failed",
+            "The executed recovery allocations do not exactly match buyer approval.",
+            "SYSTEM",
+          ));
+        } else {
+          recovery.status = "COMPLETED";
+          current.status = "COMPLETED";
+          current.timeline.push(event(
+            now,
+            "RECOVERY_OUTCOME_VALIDATED",
+            "Supplier shortfall recovered",
+            "The recovery execution exists exactly once and all allocations, quantities, costs, and arrival dates match approval.",
+            "SYSTEM",
           ));
         }
         current.updatedAt = now.toISOString();

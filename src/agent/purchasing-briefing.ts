@@ -4,7 +4,7 @@ import { z } from "zod";
 
 import {
   executeOptionalToolCalls,
-  optionalToolDefinitions,
+  optionalToolDefinitionsForCase,
   policySelectedOptionalCalls,
   runMandatoryInvestigation,
   type InvestigationToolRead,
@@ -55,7 +55,7 @@ async function selectOptionalTools(
     store: false,
     parallel_tool_calls: true,
     tool_choice: "required",
-    tools: optionalToolDefinitions,
+    tools: optionalToolDefinitionsForCase(purchasingCase),
     instructions: [
       "You are selecting additional read-only investigation tools for a retail purchasing case.",
       "Choose only tools that materially help explain risk, uncertainty, timing, or constraints in this specific case.",
@@ -65,7 +65,7 @@ async function selectOptionalTools(
     input: JSON.stringify({
       caseId: purchasingCase.id,
       eventType: purchasingCase.eventType,
-      deterministicDecision: purchasingCase.analysis.decision,
+      deterministicDecision: purchasingCase.recovery?.analysis ?? purchasingCase.analysis.decision,
       planningSignals: {
         baselineStockoutDate: purchasingCase.analysis.plan?.baselineStockoutDate ?? null,
         proposedStockoutDate: purchasingCase.analysis.plan?.proposedStockoutDate ?? null,
@@ -81,6 +81,15 @@ async function selectOptionalTools(
         maxOrderUnitsBeforeExpiry:
           purchasingCase.evidence.productPolicy.value.maxOrderUnitsBeforeExpiry ?? null,
       },
+      recoverySignals: purchasingCase.recovery
+        ? {
+          shortfallUnits: purchasingCase.recovery.analysis.shortfallUnits,
+          remainingBudget: purchasingCase.recovery.analysis.remainingBudget,
+          requiredByDate: purchasingCase.recovery.analysis.requiredByDate,
+          candidateCount: purchasingCase.recovery.analysis.candidates.length,
+          recommendedCandidateId: purchasingCase.recovery.analysis.recommendedCandidateId,
+        }
+        : null,
     }),
   });
 
@@ -90,6 +99,52 @@ async function selectOptionalTools(
 }
 
 function deterministicBriefing(purchasingCase: PurchasingCase): BriefingContent {
+  if (purchasingCase.recovery) {
+    const recovery = purchasingCase.recovery;
+    const analysis = recovery.analysis;
+    const recommended = analysis.candidates.find(
+      (candidate) => candidate.candidateId === analysis.recommendedCandidateId,
+    );
+    const action = recovery.proposal?.action ?? recommended?.action ?? null;
+    const allocationSummary = action
+      ? [
+        ...action.transfers.map((transfer) =>
+          `${transfer.quantity} units from ${transfer.sourceNodeId}`),
+        ...action.supplierOrders.map((order) =>
+          `${order.quantity} units from ${order.supplierId}`),
+      ].join(" and ")
+      : "no feasible allocation";
+
+    return {
+      headline: recommended
+        ? `Recover the ${analysis.shortfallUnits}-unit supplier shortfall`
+        : "Escalate the uncovered supplier shortfall",
+      executiveSummary: analysis.summary,
+      evidenceInsights: [
+        {
+          label: "Supplier response",
+          insight: `${analysis.confirmedUnits} of ${analysis.requestedUnits} units were confirmed, leaving ${analysis.shortfallUnits} units uncovered.`,
+        },
+        {
+          label: "Options evaluated",
+          insight: `${analysis.candidates.length} supplier, transfer, and split candidates were checked; ${analysis.candidates.filter((candidate) => candidate.feasible).length} are feasible.`,
+        },
+        {
+          label: "Recommended allocation",
+          insight: recommended
+            ? `${recommended.label} covers ${recommended.coveredUnits} units for ${recommended.currency} ${recommended.totalCost}, arriving by ${recommended.latestArrivalDate}.`
+            : "No option currently satisfies full coverage, timing, capacity, and remaining-budget constraints.",
+        },
+      ],
+      riskFlags: recommended
+        ? [`Estimated service risk is ${(recommended.serviceRisk * 100).toFixed(1)}%; availability will be revalidated before execution.`]
+        : ["The shortfall remains uncovered and requires manual escalation."],
+      buyerAction: recovery.proposal
+        ? `Review and approve recovery proposal v${recovery.proposal.version}: ${allocationSummary}. Live availability will be revalidated before execution.`
+        : "Escalate to the purchasing lead; no recovery action is currently safe to execute.",
+    };
+  }
+
   const decision = purchasingCase.analysis.decision;
   const plan = purchasingCase.analysis.plan;
   const action = decision.proposedAction;
@@ -182,8 +237,8 @@ export async function generatePurchasingBriefing(
         eventType: purchasingCase.eventType,
         readOnlyToolResults: toolResults,
         rejectedToolCalls,
-        deterministicAnalysis: purchasingCase.analysis,
-        proposal: purchasingCase.proposal,
+        deterministicAnalysis: purchasingCase.recovery?.analysis ?? purchasingCase.analysis,
+        proposal: purchasingCase.recovery?.proposal ?? purchasingCase.proposal,
       }),
       text: {
         format: zodTextFormat(briefingContentSchema, "purchasing_buyer_briefing"),

@@ -98,8 +98,45 @@ export function BuyerWorkspace({ initialCases }: { initialCases: PurchasingCase[
     run(
       () => postJson(`/api/cases/${selected.id}/supplier-confirmation`, { confirmedQuantity: quantity }),
       (updated) => updated.status === "RECOVERY_REQUIRED"
-        ? { tone: "warning", message: "Supplier shortfall detected. The case moved into the recovery workflow." }
+        ? {
+          tone: "warning",
+          message: `Supplier shortfall detected. ${updated.recovery?.analysis.summary ?? "The case moved into recovery."}`,
+        }
         : { tone: "success", message: "The supplier confirmed the full order." },
+    );
+  }
+
+  function approveRecovery() {
+    if (!selected?.recovery?.proposal) return;
+    const approvedVersion = selected.recovery.proposal.version;
+    run(
+      () => postJson(`/api/cases/${selected.id}/recovery-approve`, {
+        proposalVersion: approvedVersion,
+        buyerId: "buyer@procura.demo",
+      }),
+      (updated) => updated.status === "RECOVERY_REQUIRED"
+        ? {
+          tone: "warning",
+          message: `Recovery execution stopped safely. Availability changed, so recovery proposal v${updated.recovery?.proposal?.version} needs fresh approval.`,
+        }
+        : {
+          tone: "success",
+          message: `${updated.recovery?.execution?.executionId} executed once and validated against recovery approval.`,
+        },
+    );
+  }
+
+  function simulateRecoveryChange() {
+    if (!selected?.recovery) return;
+    run(
+      () => postJson(`/api/cases/${selected.id}/simulate-recovery-change`, {
+        sourceNodeId: "HUB-BLR-11",
+        availableUnits: 0,
+      }),
+      () => ({
+        tone: "warning",
+        message: "Demo event applied: Marathahalli transfer stock fell to zero. Approve to see the old recovery allocation stopped and replaced.",
+      }),
     );
   }
 
@@ -189,8 +226,8 @@ export function BuyerWorkspace({ initialCases }: { initialCases: PurchasingCase[
               >
                 <div className="case-card-top">
                   <span className="case-id">{item.id}</span>
-                  <span className={`decision-badge ${decisionTone(item.analysis.decision.decision)}`}>
-                    {item.analysis.decision.decision.replace("_FURTHER", "")}
+                  <span className={`decision-badge ${item.recovery ? "badge-red" : decisionTone(item.analysis.decision.decision)}`}>
+                    {item.recovery ? "RECOVERY" : item.analysis.decision.decision.replace("_FURTHER", "")}
                   </span>
                 </div>
                 <strong>{recommendation.productName}</strong>
@@ -213,6 +250,8 @@ export function BuyerWorkspace({ initialCases }: { initialCases: PurchasingCase[
         onApprove={approve}
         onSimulateChange={simulateChange}
         onSupplierConfirmation={confirmSupplier}
+        onApproveRecovery={approveRecovery}
+        onSimulateRecoveryChange={simulateRecoveryChange}
         briefing={briefings[selected.id] ?? null}
         onGenerateBriefing={generateBriefing}
       />

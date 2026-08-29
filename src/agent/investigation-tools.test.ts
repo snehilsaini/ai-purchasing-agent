@@ -103,4 +103,18 @@ describe("bounded investigation tools", () => {
     expect(investigation.rejectedCalls.join(" ")).toContain("failed validation");
     expect(investigation.rejectedCalls.join(" ")).toContain("tool-call limit exceeded");
   });
+
+  it("rejects recovery-only tools outside a supplier-shortfall event", () => {
+    const purchasingCase = testCase();
+    const investigation = executeOptionalToolCalls(purchasingCase, [{
+      name: "inspect_network_transfers",
+      arguments: JSON.stringify({
+        caseId: purchasingCase.id,
+        rationale: "Look for nearby stock.",
+      }),
+    }], "MODEL_SELECTED");
+
+    expect(investigation.results).toEqual([]);
+    expect(investigation.rejectedCalls[0]).toContain("not available for this event type");
+  });
 });

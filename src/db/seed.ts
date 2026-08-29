@@ -13,7 +13,7 @@ const database = drizzle(client, { schema });
 try {
   const repository = new PostgresCaseRepository(database);
   await repository.replaceAll(createDemoCases());
-  console.info("Seeded four Scenario 1 purchasing cases.");
+  console.info("Seeded four purchasing cases with Scenario 1 and Scenario 2 demo support.");
 } finally {
   await client.end();
 }

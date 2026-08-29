@@ -2,7 +2,7 @@
 
 ## Purpose
 
-The assignment permits mock data, APIs, databases, and services. This project models the operational systems needed for Scenario 1 without requiring company infrastructure or credentials.
+The assignment permits mock data, APIs, databases, and services. This project models the operational systems needed for Scenarios 1 and 2 without requiring company infrastructure or credentials.
 
 The mocks are deliberately typed and versioned so they preserve the important production boundaries: source ownership, data freshness, optimistic concurrency, approval, idempotency, and validation.
 
@@ -24,6 +24,15 @@ Scenario 1 uses eight evidence envelopes. Each envelope contains a typed `value`
 These are logical adapters over the versioned case evidence in the current vertical slice; they are not eight independently deployed HTTP services. The trace shown in the UI records which logical source supplied each result.
 
 In production, each adapter can be replaced with an HTTP, database, event-stream, or internal-service client while keeping the domain and planning interfaces unchanged.
+
+Scenario 2 adds two versioned evidence envelopes:
+
+| Logical read tool | Mock source system | Data returned |
+| --- | --- | --- |
+| `inspect_alternate_suppliers` | Supplier network service | Two suppliers with price, lead time, MOQ, pack multiple, capacity, and reliability |
+| `inspect_network_transfers` | Network inventory service | Two hubs with available units, transfer cost, lead time, and reliability |
+
+`inspect_recovery_candidates` exposes the deterministic planner output; it does not ask the model to rank options.
 
 ## Mock dataset
 
@@ -74,6 +83,8 @@ Next.js route handlers expose the buyer workflow.
 | `POST /api/cases/{caseId}/approve` | Approve one exact proposal version | `proposalVersion`, `buyerId` | Revalidates and may execute |
 | `POST /api/cases/{caseId}/simulate-change` | Change mock on-hand inventory | `onHandDelta` | Yes; demo-only evidence update |
 | `POST /api/cases/{caseId}/supplier-confirmation` | Record supplier-confirmed quantity/date | `confirmedQuantity`, optional `confirmedDeliveryDate` | Yes; may create recovery |
+| `POST /api/cases/{caseId}/recovery-approve` | Approve an exact recovery proposal | `proposalVersion`, `buyerId` | Revalidates and may execute recovery |
+| `POST /api/cases/{caseId}/simulate-recovery-change` | Change mock transfer availability | `sourceNodeId`, `availableUnits` | Yes; demo-only recovery evidence update |
 | `POST /api/demo/reset` | Restore the four demo cases | None | Replaces demo cases |
 
 All mutating payloads are validated with Zod. Workflow errors return appropriate HTTP conflict, validation, or not-found responses.
@@ -120,14 +131,15 @@ The same `CaseRepository` interface isolates the workflow from the selected stor
 
 OpenAI is the only optional third-party runtime service. The server reads `OPENAI_API_KEY` and `OPENAI_MODEL`; credentials are never sent to the browser.
 
-The application first sends compact case signals and four read-only function definitions to the Responses API. It validates and locally executes the selected functions, then sends the resulting trace plus deterministic result for structured buyer-facing synthesis. The model has no PO write capability. If the key is absent, deterministic policy selects optional reads; if the request/schema fails, the endpoint returns a deterministic fallback.
+The application first sends compact case signals and only the event-specific read-only functions to the Responses API: four for purchase review or three for shortfall recovery. It validates and locally executes applicable functions, then sends the resulting trace plus deterministic result for structured buyer-facing synthesis. The model has no PO or recovery write capability. If the key is absent, deterministic policy selects optional reads; if the request/schema fails, the endpoint returns a deterministic fallback.
 
 ## Failure simulations
 
-Two explicit controls demonstrate changing external reality:
+Three explicit controls demonstrate changing external reality:
 
 1. **Inventory change before approval** updates the mock warehouse evidence and version. Approval revalidation then supersedes the old proposal.
 2. **Supplier confirms less than requested** changes the mock PO to `PARTIALLY_CONFIRMED` and moves the case into recovery.
+3. **Preferred transfer stock disappears** changes versioned recovery evidence. Recovery approval then supersedes the old allocation with a newly ranked split proposal.
 
 These controls are intentionally visible in the UI so a reviewer can reproduce both failure paths without editing data or calling APIs manually.
 
@@ -139,6 +151,8 @@ These controls are intentionally visible in the UI so a reviewer can reproduce b
 | Demo inventory-change endpoint | Warehouse events or a live inventory read |
 | In-process PO record | Purchasing/ERP create-and-read-back adapter |
 | Supplier-confirmation endpoint | Supplier portal, EDI, webhook, or event consumer |
+| Mock alternate suppliers and transfer inventory | Sourcing platform and network inventory/WMS clients |
+| In-process recovery execution record | Transfer-order and supplier-order orchestration adapters |
 | Local case repository | Managed PostgreSQL plus event/action ledgers |
 | Manual reset endpoint | Test-fixture or sandbox-only administrative tooling |
 

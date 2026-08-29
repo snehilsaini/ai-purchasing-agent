@@ -33,6 +33,8 @@ export function CaseDetail({
   onApprove,
   onSimulateChange,
   onSupplierConfirmation,
+  onApproveRecovery,
+  onSimulateRecoveryChange,
   briefing,
   onGenerateBriefing,
 }: {
@@ -42,6 +44,8 @@ export function CaseDetail({
   onApprove: () => void;
   onSimulateChange: () => void;
   onSupplierConfirmation: (quantity: number) => void;
+  onApproveRecovery: () => void;
+  onSimulateRecoveryChange: () => void;
   briefing: AgentBriefing | null;
   onGenerateBriefing: () => void;
 }) {
@@ -51,7 +55,11 @@ export function CaseDetail({
   const recommendation = evidence.recommendation.value;
   const inventory = evidence.inventory.value;
   const supplier = evidence.supplier.value;
-  const isAwaiting = purchasingCase.status === "AWAITING_APPROVAL" && proposal;
+  const recovery = purchasingCase.recovery;
+  const isAwaiting = purchasingCase.status === "AWAITING_APPROVAL" && proposal && !recovery;
+  const isRecoveryAwaiting = purchasingCase.status === "RECOVERY_REQUIRED"
+    && recovery?.status === "AWAITING_APPROVAL"
+    && recovery.proposal;
 
   return (
     <section className="detail-panel">
@@ -66,6 +74,7 @@ export function CaseDetail({
             {purchasingCase.priority} priority
           </span>
           <span className="status-pill">{purchasingCase.status.replaceAll("_", " ")}</span>
+          {recovery && <span className="event-pill">SUPPLIER SHORTFALL</span>}
         </div>
       </header>
 
@@ -99,11 +108,94 @@ export function CaseDetail({
           )}
           {purchasingCase.status === "RECOVERY_REQUIRED" && (
             <div className="recovery-action">
-              <strong>Recovery required</strong>
-              <span>The supplier shortfall has re-entered the purchasing workflow.</span>
+              <strong>{recovery?.analysis.shortfallUnits ?? 0}-unit recovery required</strong>
+              <span>The supplier response has triggered a new investigated and approval-gated decision.</span>
             </div>
           )}
         </section>
+
+        {recovery && (
+          <section className="surface recovery-workspace">
+            <div className="section-heading">
+              <div>
+                <span className="section-number">S2</span>
+                <div>
+                  <h3>Supplier shortfall recovery</h3>
+                  <p>{recovery.analysis.summary}</p>
+                </div>
+              </div>
+              <span className={`recovery-status ${recovery.status.toLowerCase()}`}>
+                {recovery.status.replaceAll("_", " ")}
+              </span>
+            </div>
+
+            <div className="recovery-metrics">
+              <div><span>Requested</span><strong>{recovery.analysis.requestedUnits}</strong><small>units</small></div>
+              <div><span>Confirmed</span><strong>{recovery.analysis.confirmedUnits}</strong><small>units</small></div>
+              <div className="shortfall"><span>Shortfall</span><strong>{recovery.analysis.shortfallUnits}</strong><small>units</small></div>
+              <div><span>Remaining budget</span><strong>{money(recovery.analysis.remainingBudget, recovery.analysis.currency)}</strong></div>
+              <div><span>Required by</span><strong>{recovery.analysis.requiredByDate}</strong></div>
+            </div>
+
+            <div className="candidate-list">
+              {recovery.analysis.candidates.map((candidate) => {
+                const recommended = candidate.candidateId === recovery.analysis.recommendedCandidateId;
+                return (
+                  <article className={`candidate-row ${recommended ? "recommended" : ""} ${candidate.feasible ? "" : "infeasible"}`} key={candidate.candidateId}>
+                    <div className="candidate-title">
+                      <span>{candidate.strategy.replaceAll("_", " ")}</span>
+                      <strong>{candidate.label}</strong>
+                    </div>
+                    <div><span>Coverage</span><strong>{candidate.coveredUnits}/{recovery.analysis.shortfallUnits}</strong></div>
+                    <div><span>Cost</span><strong>{money(candidate.totalCost, candidate.currency)}</strong></div>
+                    <div><span>Arrival</span><strong>{candidate.latestArrivalDate}</strong></div>
+                    <div><span>Risk</span><strong>{(candidate.serviceRisk * 100).toFixed(1)}%</strong></div>
+                    <div className="candidate-result">
+                      <span className={candidate.feasible ? "feasible" : "blocked"}>
+                        {recommended ? "RECOMMENDED" : candidate.feasible ? "FEASIBLE" : "BLOCKED"}
+                      </span>
+                      <small>{candidate.constraints.join(" ")}</small>
+                    </div>
+                  </article>
+                );
+              })}
+            </div>
+
+            {isRecoveryAwaiting && (
+              <div className="recovery-approval-bar">
+                <div>
+                  <span>Recovery proposal v{recovery.proposal!.version}</span>
+                  <strong>
+                    {recovery.proposal!.action.transfers.map((item) => `${item.quantity} units from ${item.sourceNodeId}`).join(", ")}
+                    {recovery.proposal!.action.transfers.length > 0 && recovery.proposal!.action.supplierOrders.length > 0 ? " + " : ""}
+                    {recovery.proposal!.action.supplierOrders.map((item) => `${item.quantity} units from ${item.supplierId}`).join(", ")}
+                  </strong>
+                  <small>Revalidates availability, cost, timing, and exact allocations before execution.</small>
+                </div>
+                <button className="primary-button" onClick={onApproveRecovery} disabled={isPending}>
+                  {isPending ? "Revalidating…" : `Approve recovery v${recovery.proposal!.version}`}
+                </button>
+              </div>
+            )}
+
+            {isRecoveryAwaiting && recovery.proposal!.version === 1 && (
+              <div className="recovery-safety-demo">
+                <div><span>Recovery safety demo</span><small>Remove Marathahalli stock before approval to force a new split allocation.</small></div>
+                <button className="secondary-button danger" onClick={onSimulateRecoveryChange} disabled={isPending}>Set transfer stock to zero</button>
+              </div>
+            )}
+
+            {recovery.status === "COMPLETED" && recovery.execution && (
+              <div className="completed-action recovery-complete">
+                <span className="success-check">✓</span>
+                <div>
+                  <strong>{recovery.execution.executionId} executed and validated</strong>
+                  <span>{recovery.execution.action.coveredUnits} recovery units match the approved allocations exactly.</span>
+                </div>
+              </div>
+            )}
+          </section>
+        )}
 
         <div className="content-grid">
           <div className="main-column">
@@ -229,7 +321,7 @@ export function CaseDetail({
                 {decision.importantFactors.map((factor) => <li key={factor}>{factor}</li>)}
               </ul>
 
-              {proposal && (
+              {proposal && !recovery && (
                 <div className="proposal-card">
                   <div><span>Proposal</span><strong>v{proposal.version}</strong></div>
                   <div><span>Valid until</span><strong>{formatTime(proposal.validUntil)}</strong></div>

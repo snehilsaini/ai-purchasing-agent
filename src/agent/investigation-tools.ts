@@ -1,6 +1,10 @@
 import { z } from "zod";
 
-import type { PurchasingCase, ScenarioOneEvidence } from "@/domain/purchasing";
+import type {
+  PurchasingCase,
+  ScenarioOneEvidence,
+  SupplierShortfallEvidence,
+} from "@/domain/purchasing";
 
 export const MAX_OPTIONAL_TOOL_CALLS = 4;
 
@@ -32,7 +36,9 @@ interface MandatoryEvidenceTool {
 interface OptionalEvidenceTool {
   name: string;
   description: string;
-  evidenceKeys: (keyof ScenarioOneEvidence)[];
+  scope: "PURCHASE_REVIEW" | "SHORTFALL_RECOVERY";
+  evidenceKeys?: (keyof ScenarioOneEvidence)[];
+  recoveryEvidenceKeys?: (keyof SupplierShortfallEvidence)[];
   read: (purchasingCase: PurchasingCase) => unknown;
 }
 
@@ -56,6 +62,7 @@ const optionalTools = {
   inspect_demand_curve: {
     name: "inspect_demand_curve",
     description: "Inspect daily forecast shape, peak demand, and forecast confidence when timing or volatility may affect the order.",
+    scope: "PURCHASE_REVIEW",
     evidenceKeys: ["demand"],
     read: (purchasingCase) => {
       const demand = purchasingCase.evidence.demand.value;
@@ -74,6 +81,7 @@ const optionalTools = {
   inspect_inbound_schedule: {
     name: "inspect_inbound_schedule",
     description: "Inspect each open purchase order and its timing when confirmed, delayed, or duplicate inbound supply could change the need.",
+    scope: "PURCHASE_REVIEW",
     evidenceKeys: ["openPurchaseOrders"],
     read: (purchasingCase) => ({
       protectionEndDate: purchasingCase.analysis.plan?.protectionEndDate ?? null,
@@ -84,6 +92,7 @@ const optionalTools = {
   inspect_supplier_risk: {
     name: "inspect_supplier_risk",
     description: "Inspect supplier reliability, capacity, lead time, MOQ, and order multiple when fulfilment risk or constraints matter.",
+    scope: "PURCHASE_REVIEW",
     evidenceKeys: ["supplier"],
     read: (purchasingCase) => {
       const supplier = purchasingCase.evidence.supplier.value;
@@ -101,6 +110,7 @@ const optionalTools = {
   inspect_perishability_exposure: {
     name: "inspect_perishability_exposure",
     description: "Inspect shelf-life and expiry-related order limits when overbuy or waste risk may constrain the purchase.",
+    scope: "PURCHASE_REVIEW",
     evidenceKeys: ["productPolicy", "demand"],
     read: (purchasingCase) => ({
       ...purchasingCase.evidence.productPolicy.value,
@@ -108,37 +118,66 @@ const optionalTools = {
       proposedOrderUnits: purchasingCase.analysis.decision.recommendedQuantity,
     }),
   },
+  inspect_alternate_suppliers: {
+    name: "inspect_alternate_suppliers",
+    description: "Inspect alternate suppliers, lead times, pricing, capacity, reliability, MOQ, and pack rules for a supplier-shortfall recovery.",
+    scope: "SHORTFALL_RECOVERY",
+    recoveryEvidenceKeys: ["alternateSuppliers"],
+    read: (purchasingCase) => purchasingCase.recovery!.evidence.alternateSuppliers.value,
+  },
+  inspect_network_transfers: {
+    name: "inspect_network_transfers",
+    description: "Inspect inventory available for transfer from nearby hubs, including arrival time, cost, and reliability.",
+    scope: "SHORTFALL_RECOVERY",
+    recoveryEvidenceKeys: ["transferOptions"],
+    read: (purchasingCase) => purchasingCase.recovery!.evidence.transferOptions.value,
+  },
+  inspect_recovery_candidates: {
+    name: "inspect_recovery_candidates",
+    description: "Inspect deterministic recovery candidates, feasibility failures, cost-risk scores, and the recommended option.",
+    scope: "SHORTFALL_RECOVERY",
+    recoveryEvidenceKeys: ["alternateSuppliers", "transferOptions"],
+    read: (purchasingCase) => purchasingCase.recovery!.analysis,
+  },
 } satisfies Record<string, OptionalEvidenceTool>;
 
 export type OptionalToolName = keyof typeof optionalTools;
 
-export const optionalToolDefinitions = Object.values(optionalTools).map((tool) => ({
-  type: "function" as const,
-  name: tool.name,
-  description: tool.description,
-  strict: true,
-  parameters: {
-    type: "object" as const,
-    properties: {
-      caseId: {
-        type: "string" as const,
-        description: "The exact purchasing case identifier supplied in the investigation context.",
+export function optionalToolDefinitionsForCase(purchasingCase: PurchasingCase) {
+  const scope = purchasingCase.recovery ? "SHORTFALL_RECOVERY" : "PURCHASE_REVIEW";
+  return Object.values(optionalTools)
+    .filter((tool) => tool.scope === scope)
+    .map((tool) => ({
+      type: "function" as const,
+      name: tool.name,
+      description: tool.description,
+      strict: true,
+      parameters: {
+        type: "object" as const,
+        properties: {
+          caseId: {
+            type: "string" as const,
+            description: "The exact purchasing case identifier supplied in the investigation context.",
+          },
+          rationale: {
+            type: "string" as const,
+            description: "A concise explanation of why this additional evidence is useful for this case.",
+          },
+        },
+        required: ["caseId", "rationale"],
+        additionalProperties: false,
       },
-      rationale: {
-        type: "string" as const,
-        description: "A concise explanation of why this additional evidence is useful for this case.",
-      },
-    },
-    required: ["caseId", "rationale"],
-    additionalProperties: false,
-  },
-}));
+    }));
+}
 
 function traceMetadata(
   purchasingCase: PurchasingCase,
-  evidenceKeys: (keyof ScenarioOneEvidence)[],
+  tool: OptionalEvidenceTool,
 ) {
-  const evidence = evidenceKeys.map((key) => purchasingCase.evidence[key]);
+  const baseEvidence = (tool.evidenceKeys ?? []).map((key) => purchasingCase.evidence[key]);
+  const recoveryEvidence = (tool.recoveryEvidenceKeys ?? []).flatMap((key) =>
+    purchasingCase.recovery ? [purchasingCase.recovery.evidence[key]] : []);
+  const evidence = [...baseEvidence, ...recoveryEvidence];
   return {
     source: [...new Set(evidence.map((item) => item.source))].join(" + "),
     observedAt: evidence.map((item) => item.observedAt).sort()[0],
@@ -147,7 +186,7 @@ function traceMetadata(
 }
 
 export function runMandatoryInvestigation(purchasingCase: PurchasingCase): InvestigationToolResult[] {
-  return mandatoryTools.map((tool) => {
+  const results: InvestigationToolResult[] = mandatoryTools.map((tool) => {
     const evidence = purchasingCase.evidence[tool.evidenceKey];
     return {
       tool: tool.name,
@@ -159,11 +198,65 @@ export function runMandatoryInvestigation(purchasingCase: PurchasingCase): Inves
       result: evidence.value,
     };
   });
+
+  if (purchasingCase.recovery && purchasingCase.purchaseOrder) {
+    results.push({
+      tool: "get_supplier_confirmation",
+      source: "purchase-order-service",
+      observedAt: purchasingCase.recovery.analysis.calculatedAt,
+      evidenceVersion: `${purchasingCase.purchaseOrder.purchaseOrderId}:${purchasingCase.purchaseOrder.status}:${purchasingCase.purchaseOrder.confirmedQuantity}`,
+      selection: "MANDATORY",
+      rationale: "The reported supplier shortfall is the triggering fact for recovery planning.",
+      result: purchasingCase.purchaseOrder,
+    });
+    results.push({
+      tool: "get_recovery_budget_and_deadline",
+      source: "recovery-policy",
+      observedAt: purchasingCase.recovery.analysis.calculatedAt,
+      evidenceVersion: `${purchasingCase.recovery.analysis.remainingBudget}:${purchasingCase.recovery.analysis.requiredByDate}`,
+      selection: "MANDATORY",
+      rationale: "Recovery must cover the shortage within the remaining budget and required-by date.",
+      result: {
+        shortfallUnits: purchasingCase.recovery.analysis.shortfallUnits,
+        remainingBudget: purchasingCase.recovery.analysis.remainingBudget,
+        currency: purchasingCase.recovery.analysis.currency,
+        requiredByDate: purchasingCase.recovery.analysis.requiredByDate,
+      },
+    });
+  }
+
+  return results;
 }
 
 export function policySelectedOptionalCalls(purchasingCase: PurchasingCase): OptionalToolCall[] {
   const calls: OptionalToolCall[] = [];
   const { evidence, analysis } = purchasingCase;
+
+  if (purchasingCase.recovery) {
+    return [
+      {
+        name: "inspect_alternate_suppliers",
+        arguments: JSON.stringify({
+          caseId: purchasingCase.id,
+          rationale: "Compare emergency supplier capacity, timing, cost, and order constraints.",
+        }),
+      },
+      {
+        name: "inspect_network_transfers",
+        arguments: JSON.stringify({
+          caseId: purchasingCase.id,
+          rationale: "Check whether nearby inventory can cover the shortfall faster and more cheaply.",
+        }),
+      },
+      {
+        name: "inspect_recovery_candidates",
+        arguments: JSON.stringify({
+          caseId: purchasingCase.id,
+          rationale: "Review deterministic feasibility failures and the cost-risk ranking.",
+        }),
+      },
+    ];
+  }
 
   if (evidence.demand.value.dailyUnits?.length || evidence.demand.value.forecastConfidence < 0.8) {
     calls.push({
@@ -230,9 +323,15 @@ export function executeOptionalToolCalls(
       continue;
     }
 
-    const tool = optionalTools[call.name as OptionalToolName];
+    const tool = optionalTools[call.name as OptionalToolName] as OptionalEvidenceTool | undefined;
     if (!tool) {
       rejectedCalls.push(`${call.name}: tool is not in the approved read-only registry`);
+      continue;
+    }
+
+    const requiredScope = purchasingCase.recovery ? "SHORTFALL_RECOVERY" : "PURCHASE_REVIEW";
+    if (tool.scope !== requiredScope) {
+      rejectedCalls.push(`${call.name}: tool is not available for this event type`);
       continue;
     }
 
@@ -258,7 +357,7 @@ export function executeOptionalToolCalls(
     executed.add(tool.name);
     results.push({
       tool: tool.name,
-      ...traceMetadata(purchasingCase, tool.evidenceKeys),
+      ...traceMetadata(purchasingCase, tool),
       selection,
       rationale: parsedArguments.data.rationale,
       result: tool.read(purchasingCase),
