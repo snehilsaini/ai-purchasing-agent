@@ -16,11 +16,17 @@ flowchart LR
     ANALYZE --> PLAN[Deterministic planner]
     PLAN --> RULES[Constraint engine]
     API --> AGENT[Buyer briefing generator]
-    AGENT --> READ[Read-only evidence tools]
-    AGENT --> LLM[OpenAI Responses API]
+    AGENT --> READ[Eight required evidence views]
+    AGENT --> LLM[Optional OpenAI Responses API]
 ```
 
 The important dependency direction is inward: Next.js and database adapters depend on the workflow/domain layers. Replenishment rules do not depend on UI, HTTP, PostgreSQL, or an LLM.
+
+## Evidence and tool model
+
+Scenario 1 uses a policy-defined set of eight required read-only evidence views: recommendation, inventory, demand, open POs, supplier terms, budget, storage, and product policy. In the current vertical slice these views read versioned evidence from the case aggregate; they are logical integration boundaries rather than independently deployed network services.
+
+The application, not the model, runs the required reads. OpenAI receives their trace plus the completed deterministic analysis and produces only a structured buyer briefing. This fixed approach ensures the model cannot skip safety-critical evidence. Future scenarios can introduce bounded dynamic selection for optional tools while retaining a deterministic minimum-evidence gate.
 
 ## Scenario 1 execution sequence
 
@@ -31,17 +37,17 @@ sequenceDiagram
     participant E as Evidence adapters
     participant P as Planner and policies
     participant B as Buyer
-    participant O as PO service
+    participant O as Mock PO executor
 
     S->>W: PURCHASE_RECOMMENDATION_CREATED (800 units)
-    W->>E: Read inventory, demand, POs, supplier, budget, storage
+    W->>E: Load required versioned evidence
     E-->>W: Versioned evidence with source and observedAt
     W->>P: Validate freshness and calculate plan
     P-->>W: MODIFY to 450 + constraint results
     W-->>B: Proposal v1 for exactly 450 units
     Note over W,B: Workflow state is persisted; no request remains running
     B->>W: Approve proposal v1
-    W->>E: Refresh volatile evidence
+    W->>E: Reload latest persisted evidence snapshot
     W->>P: Recalculate and compare action fingerprint
     alt Material change
         P-->>W: New action, for example 350 units
@@ -49,8 +55,8 @@ sequenceDiagram
     else Unchanged
         W->>O: Create PO with idempotency key
         O-->>W: PO record
-        W->>O: Read back PO
-        W-->>B: Exact fields validated; case completed
+        W->>O: Validate stored PO payload
+        W-->>B: Exact approved fields validated; case completed
     end
 ```
 
@@ -117,3 +123,5 @@ Likely additions are:
 - Scenario 2: alternate supplier, transfer, and split-order candidate generation;
 - Scenario 3: demand-anomaly evidence and forecast override policy;
 - Scenario 4: constraint-collision resolution and explicit infeasibility explanations.
+
+See [Solution approach](approach.md), [Test scenarios and evaluation approach](evaluation.md), and [Mock systems, data, and APIs](mock-systems.md) for the implementation details behind these boundaries.

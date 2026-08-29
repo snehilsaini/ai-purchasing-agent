@@ -4,9 +4,15 @@
 
 An explainable, constraint-aware purchasing agent for retail and quick-commerce operations. The system reviews purchasing recommendations, gathers operational evidence, makes a decision, executes an authorised action, and validates the real outcome.
 
-Scenario 1 is implemented as a complete vertical slice: attention queue, evidence inspection, deterministic replenishment math, constraint checks, `ACCEPT` / `MODIFY` / `REJECT` / `INVESTIGATE_FURTHER` decisions, versioned approval, live-data revalidation, idempotent purchase-order creation, exact read-back validation, and supplier-shortfall recovery.
+Scenario 1 is implemented as a complete vertical slice: attention queue, evidence inspection, deterministic replenishment math, constraint checks, `ACCEPT` / `MODIFY` / `REJECT` / `INVESTIGATE_FURTHER` decisions, versioned approval, live-data revalidation, idempotent mock purchase-order creation, exact approved-payload validation, and supplier-shortfall recovery.
 
 The original design baseline remains visible in the first Git commit. This README now describes the working implementation.
+
+## Prerequisites
+
+- Node.js 20.9 or newer and npm;
+- Docker only for the optional PostgreSQL mode;
+- an OpenAI API key only for the optional model-generated briefing.
 
 ## Run locally
 
@@ -60,7 +66,10 @@ npm run build
 
 Useful reviewer documents:
 
+- [Solution approach](docs/approach.md)
 - [Architecture and safety model](docs/architecture.md)
+- [Test scenarios and evaluation approach](docs/evaluation.md)
+- [Mock systems, data, and APIs](docs/mock-systems.md)
 - [Three-minute demo script](docs/demo-script.md)
 
 ## Problem framing
@@ -104,25 +113,25 @@ The buyer supervises decisions and approves risk. They do not need to manually c
 
 The agent never assumes that the upstream recommendation is correct. It reconstructs the purchasing position from current evidence.
 
-### 2. AI orchestrates; deterministic code calculates
+### 2. AI explains; deterministic code decides and calculates
 
-The LLM decides what to investigate, selects appropriate tools, identifies missing or conflicting evidence, and explains the result.
+The current Scenario 1 handler gathers a policy-defined set of eight required evidence categories. The optional LLM receives those read-only results plus the deterministic analysis and produces a structured buyer briefing; it does not select tools, calculate the order, or prepare the action.
 
 Regular application code performs inventory projections, purchasing calculations, constraint enforcement, approval checks, and exact post-action validation.
 
 ### 3. Evidence has provenance and freshness
 
-Important facts are stored with their source and retrieval time. Missing, stale, or contradictory critical evidence leads to `INVESTIGATE_FURTHER`, not a fabricated assumption.
+Important facts are stored with their source and retrieval time. Missing, invalid, or stale critical evidence leads to `INVESTIGATE_FURTHER`, not a fabricated assumption.
 
 ### 4. Approval is not blind execution
 
-A buyer approves a specific version of an action proposal. Immediately before execution, the system reloads volatile data and recalculates the plan.
+A buyer approves a specific version of an action proposal. Immediately before execution, the system loads the latest persisted evidence snapshot and recalculates the plan.
 
 If the quantity, supplier, price, delivery date, or risk has materially changed, the old proposal is superseded and a new approval is required.
 
 ### 5. Success is a business outcome
 
-An HTTP success response or a newly created PO row is not sufficient. The system reads the resulting PO back, checks its fields, obtains supplier confirmation, and recalculates the projected inventory outcome.
+An HTTP success response or a newly created PO record is not sufficient. The mock workflow checks the exact approved payload and records supplier confirmation. A partial confirmation moves the case to recovery instead of being treated as success.
 
 ### 6. Every action is auditable and safe to retry
 
@@ -130,7 +139,7 @@ The system records evidence, calculations, decisions, approvals, action attempts
 
 ## Scenario 1 - Recommendation review
 
-Scenario 1 will be implemented completely before broadening the system. Its implementation will use reusable domain concepts and workflow stages so that the remaining scenarios can be added without redesigning the application.
+Scenario 1 is implemented completely before broadening the system. It uses reusable domain concepts and workflow stages so that the remaining scenarios can be added without redesigning the application.
 
 ### Inputs required by the assignment
 
@@ -142,40 +151,42 @@ Scenario 1 will be implemented completely before broadening the system. Its impl
 - available purchasing budget;
 - available storage capacity.
 
-### Additional evidence considered
+### Additional evidence implemented
 
 - reserved, damaged, quarantined, and otherwise unusable inventory;
-- forecast confidence, historical error, and bias;
-- promotions, seasonality, and recent sales velocity;
+- forecast confidence and a daily demand curve;
 - PO confirmation status and expected arrival date;
 - supplier capacity and historical delivery reliability;
-- order multiples, case packs, price breaks, and freight;
+- order multiples and case-pack alignment;
 - shelf life and expiry risk;
-- inter-node transfers and alternate suppliers;
-- category-specific storage and inbound receiving capacity;
 - timestamps and versions for all volatile information.
+
+Future scenario handlers can add historical forecast error, promotions, recent sales velocity, alternate suppliers, inter-node transfers, price breaks, freight, and category-specific receiving constraints.
 
 ### Simplified purchasing calculation
 
 ```text
 protection period
-    = supplier lead time + time until the next purchasing review
+    = policy/forecast input covering the purchasing risk window
+
+expected delivery date
+    = analysis time + supplier lead time
 
 target inventory
     = expected demand during the protection period + safety stock
 
 inventory position
-    = usable on-hand inventory
+    = on-hand inventory
+      - reserved, damaged, quarantined, and backordered units
       + relevant confirmed inbound inventory
-      - reservations and backorders
 
 raw purchase requirement
     = max(0, target inventory - inventory position)
 ```
 
-The raw requirement is then evaluated against MOQ, order multiples, supplier availability, budget, storage, shelf life, maximum stock cover, and delivery feasibility.
+The raw requirement is then evaluated against MOQ, order multiples, supplier capacity, budget, storage, and shelf-life exposure.
 
-A day-by-day projected inventory balance will supplement the aggregate calculation so that a temporary stockout before the delivery date is not hidden by a healthy ending balance.
+A day-by-day projected inventory balance supplements the aggregate calculation so that a temporary stockout before the delivery date is not hidden by a healthy ending balance.
 
 ### Illustrative 800-unit case
 
@@ -201,7 +212,7 @@ The following values are mock data used to explain the intended behaviour; they 
 = 450 units required
 ```
 
-The agent should therefore return a structured `MODIFY` decision rather than blindly accepting 800:
+The application therefore returns a structured `MODIFY` decision rather than blindly accepting 800:
 
 ```json
 {
@@ -210,10 +221,10 @@ The agent should therefore return a structured `MODIFY` decision rather than bli
   "recommendedQuantity": 450,
   "confidence": "HIGH",
   "importantFactors": [
-    "300 units are already on order",
-    "450 units achieves the safety-stock target",
-    "800 units creates avoidable excess",
-    "MOQ, budget, and storage checks pass"
+    "300 confirmed units are due within the protection period",
+    "450 units are required before operational constraints",
+    "450 units leave a projected ending balance of 50 units",
+    "MOQ, order multiple, budget, storage, capacity, and shelf-life checks pass"
   ],
   "proposedAction": {
     "type": "CREATE_PURCHASE_ORDER",
@@ -223,7 +234,7 @@ The agent should therefore return a structured `MODIFY` decision rather than bli
 }
 ```
 
-The application will calculate this response from scenario data. It will not contain special logic stating that 800 always becomes 450.
+The application calculates this response from scenario data. It contains no special rule stating that 800 always becomes 450.
 
 ## End-to-end workflow
 
@@ -254,21 +265,22 @@ flowchart TD
 
 ## Approval-time revalidation
 
-The application will persist workflow state while waiting for a buyer. No server process or LLM request remains running during that time.
+The application persists workflow state while waiting for a buyer. No server process or LLM request remains running during that time.
 
 An action proposal includes:
 
 - a proposal ID and version;
-- the evidence snapshot used to create it;
+- the evidence-version map used to create it;
 - the exact proposed action;
-- a calculation timestamp and validity window;
-- the buyer and time associated with approval;
+- creation time and validity window;
 - an action fingerprint and idempotency key.
+
+The buyer identity and approval time are recorded as an audit event when approval occurs.
 
 When the buyer approves:
 
 1. the backend atomically claims the expected proposal version;
-2. volatile data is retrieved again;
+2. the latest persisted evidence snapshot is loaded again;
 3. the deterministic plan and constraints are rerun;
 4. the recalculated action is compared with the approved action;
 5. unchanged actions may execute;
@@ -292,15 +304,15 @@ Validation occurs at three levels.
 
 - the PO exists exactly once;
 - product, node, supplier, quantity, price, and date match the approved action;
-- budget and capacity effects were recorded correctly.
+- a mismatched mock PO payload moves the case to recovery.
 
 ### After supplier response
 
-- the confirmed quantity matches the requested quantity;
-- the confirmed date still avoids a projected stockout;
-- the updated purchasing plan remains acceptable.
+- the confirmed quantity and delivery date are recorded;
+- full confirmation keeps the case completed;
+- partial confirmation moves the case to recovery and records the shortfall.
 
-If a supplier confirms only 300 of an approved 450 units, the validator emits a `SUPPLIER_SHORTFALL_REPORTED` event. That event is processed through the same workflow rather than hidden as a completed action.
+If a supplier confirms only 300 of an approved 450 units, the validator records a `SUPPLIER_SHORTFALL_REPORTED` recovery event rather than hiding the discrepancy behind a successful PO creation. Alternate sourcing and coverage recalculation are intentionally deferred to the Scenario 2 handler.
 
 ## Extensibility across the four scenarios
 
@@ -333,35 +345,36 @@ Scenario-specific modules determine required evidence, candidate actions, and su
 
 | Responsibility | LLM agent | Deterministic application | Buyer |
 | --- | :---: | :---: | :---: |
-| Identify evidence to investigate | Yes | Defines minimum requirements | No |
-| Retrieve operational evidence | Orchestrates | Runs typed integrations | No |
+| Identify required Scenario 1 evidence | No | Yes | No |
+| Retrieve operational evidence | No | Runs typed read-only adapters | No |
 | Calculate quantities and projections | No | Yes | No |
 | Enforce hard constraints | No | Yes | No |
-| Produce and explain the decision | Yes | Validates the schema | Reviews |
-| Prepare an action plan | Yes | Validates policy and payload | Reviews |
+| Produce the purchasing decision | No | Yes | Reviews |
+| Explain the validated decision | Optional | Provides deterministic fallback | Reviews |
+| Prepare an action proposal | No | Yes | Reviews |
 | Authorise material spending | No | Enforces approval rules | Yes |
-| Execute an authorised action | Orchestrates | Performs the write | No |
-| Verify exact action results | Assesses context | Performs exact checks | Reviews exceptions |
+| Execute an authorised action | No | Performs the write | No |
+| Verify exact action results | No | Performs exact checks | Reviews exceptions |
 
-The investigation agent will not receive an unrestricted purchase-order mutation tool. It produces a typed `ActionPlan`; the application validates and executes that plan only after policy and approval requirements are satisfied.
+The optional model receives no purchase-order mutation tool. The application produces, validates, and executes a typed action only after deterministic policy and approval requirements are satisfied.
 
-## Proposed architecture
+## Architecture
 
 The application is a TypeScript modular monolith: one repository and one deployable application with explicit internal boundaries.
 
 ```mermaid
 flowchart LR
     UI[Buyer dashboard] --> API[Application API]
-    API --> WF[Persistent purchasing workflow]
-    WF --> DB[(PostgreSQL)]
-    WF --> AGENT[Agent orchestrator]
-    AGENT --> LLM[OpenAI Responses API]
-    AGENT --> TOOLS[Read-only business tools]
-    TOOLS --> SERVICES[Mock operational services]
+    API --> WF[Purchasing workflow]
+    WF --> DB[(Memory or PostgreSQL repository)]
+    API --> AGENT[Buyer briefing generator]
+    AGENT --> LLM[Optional OpenAI Responses API]
+    AGENT --> TOOLS[Eight required read-only evidence views]
+    TOOLS --> SERVICES[Versioned mock operational evidence]
     WF --> PLAN[Planning engine]
     WF --> RULES[Constraints and policies]
-    RULES --> EXEC[Action executor]
-    EXEC --> PO[Mock PO service]
+    RULES --> EXEC[Mock action executor]
+    EXEC --> PO[PO record]
     PO --> VALIDATOR[Outcome validator]
     VALIDATOR --> WF
 ```
@@ -380,34 +393,34 @@ flowchart LR
 | LLM integration | OpenAI Responses API using the official JavaScript SDK |
 | Model | Configurable through `OPENAI_MODEL`; default `gpt-5.4-mini` |
 | Unit and integration tests | Vitest |
-| Browser tests | Playwright |
+| Browser verification | Repeatable manual demo; browser-level CI is a future extension |
 | Local infrastructure | Docker Compose for PostgreSQL |
 
-The direct OpenAI SDK is preferred over a heavyweight agent framework for the first implementation. A small, explicit orchestration loop will be easier to understand, trace, test, and modify during an interview discussion.
+The direct OpenAI SDK is used instead of a heavyweight agent framework. The implemented path is one explicit Structured Output synthesis call after policy-directed evidence collection and deterministic analysis.
 
-## Planned module boundaries
+## Implemented module boundaries
 
 ```text
 src/
 ├── app/                  # Pages and HTTP endpoints
+├── components/           # Buyer workspace and case-detail UI
 ├── domain/               # Cases, evidence, decisions, actions, validation
-├── agent/                # Prompts, tool schemas, and orchestration
-├── planning/             # Inventory projection and replenishment calculations
-├── constraints/          # Budget, storage, supplier, MOQ, and shelf-life rules
+├── agent/                # Optional structured buyer briefing
+├── planning/             # Projections, replenishment math, and constraints
 ├── policies/             # Freshness, material-change, and approval policies
 ├── workflows/            # Persistent case-state transitions
-├── integrations/         # Mock operational-system adapters
 ├── db/                   # Schema, migrations, and seed data
+├── repositories/         # Memory and PostgreSQL adapters
 └── evaluation/           # Scenario fixtures, assertions, and runner
 ```
 
-The implementation also contains `repositories/` for swappable memory/PostgreSQL storage and `components/` for the buyer experience. The domain, planning, policy, and workflow layers do not import React or Next.js.
+The domain, planning, policy, and workflow layers do not import React or Next.js.
 
 ## Evaluation strategy
 
-The evaluation will assert the complete decision trajectory, not only the final prose response.
+The evaluation asserts the complete decision trajectory, not only the final prose response.
 
-Initial Scenario 1 cases will cover:
+Scenario 1 evaluation and workflow tests cover:
 
 1. accept a correct recommendation;
 2. modify a recommendation because confirmed inbound supply already exists;
@@ -420,7 +433,7 @@ Initial Scenario 1 cases will cover:
 9. prevent duplicate PO creation during retries;
 10. enter recovery when the supplier confirms less than requested.
 
-Each case should verify:
+Each case verifies:
 
 - the required information was obtained;
 - freshness and evidence sufficiency were checked;
@@ -456,11 +469,11 @@ Memory mode is deliberately available for a reliable interview demo. PostgreSQL 
 
 ## Security
 
-- API keys and secrets will never be committed.
-- LLM credentials will remain server-side.
-- Required environment variables will be documented in `.env.example`.
-- All action attempts and approval decisions will be auditable.
-- Mock services will be used for external operational systems.
+- API keys and secrets are excluded from version control.
+- LLM credentials remain server-side.
+- Required environment variables are documented in `.env.example`.
+- Action attempts and approval decisions are auditable in the case timeline.
+- Versioned mock evidence represents external operational systems.
 - `npm audit --omit=dev` reports zero production vulnerabilities. The full development audit currently reports four moderate findings through Drizzle Kit's deprecated `@esbuild-kit` loader; the affected package is confined to local schema-generation tooling. A forced audit fix would downgrade Drizzle Kit across a breaking boundary, so the project tracks the upstream fix instead of silently forcing an incompatible version.
 
 ## Design status
