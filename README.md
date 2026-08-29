@@ -1,10 +1,67 @@
 # AI Purchasing Agent
 
-> Design baseline - v0.1
+> Working Scenario 1 vertical slice - v0.2
 
 An explainable, constraint-aware purchasing agent for retail and quick-commerce operations. The system reviews purchasing recommendations, gathers operational evidence, makes a decision, executes an authorised action, and validates the real outcome.
 
-This initial commit records the product and engineering approach before implementation begins. The design is expected to evolve as it is tested against concrete scenarios.
+Scenario 1 is implemented as a complete vertical slice: attention queue, evidence inspection, deterministic replenishment math, constraint checks, `ACCEPT` / `MODIFY` / `REJECT` / `INVESTIGATE_FURTHER` decisions, versioned approval, live-data revalidation, idempotent purchase-order creation, exact read-back validation, and supplier-shortfall recovery.
+
+The original design baseline remains visible in the first Git commit. This README now describes the working implementation.
+
+## Run locally
+
+### Fastest path: zero-setup memory mode
+
+```bash
+npm install
+cp .env.example .env.local
+npm run dev
+```
+
+Open [http://localhost:3000](http://localhost:3000). `DATABASE_MODE=memory` is the default, so the full workflow is demonstrable without Docker or an API key.
+
+### Persistent PostgreSQL mode
+
+```bash
+docker compose up -d postgres
+npm run db:migrate
+npm run db:seed
+```
+
+Then set the following in `.env.local` and restart the application:
+
+```dotenv
+DATABASE_MODE=postgres
+DATABASE_URL=postgresql://purchasing:purchasing@localhost:5433/purchasing_agent
+```
+
+Port `5433` is intentionally used on the host so the project does not collide with a conventional local PostgreSQL installation on `5432`.
+
+### Optional OpenAI briefing
+
+The decision engine does not require an LLM. To enable model-generated buyer briefings, add these server-side values to `.env.local`:
+
+```dotenv
+OPENAI_API_KEY=your_key_here
+OPENAI_MODEL=gpt-5.4-mini
+```
+
+The implementation uses the OpenAI Responses API with Structured Outputs. The model receives the trace from eight read-only evidence adapters plus the deterministic result; it may explain the decision but cannot alter calculations or authorise/execute spend. Without a key—or if schema validation/API access fails—the UI clearly uses a deterministic fallback. See the official [GPT-5.4 Mini model documentation](https://developers.openai.com/api/docs/models/gpt-5.4-mini).
+
+### Verification
+
+```bash
+npm run typecheck
+npm run lint
+npm test
+npm run eval
+npm run build
+```
+
+Useful reviewer documents:
+
+- [Architecture and safety model](docs/architecture.md)
+- [Three-minute demo script](docs/demo-script.md)
 
 ## Problem framing
 
@@ -290,7 +347,7 @@ The investigation agent will not receive an unrestricted purchase-order mutation
 
 ## Proposed architecture
 
-The application will be a TypeScript modular monolith: one repository and one deployable application with explicit internal boundaries.
+The application is a TypeScript modular monolith: one repository and one deployable application with explicit internal boundaries.
 
 ```mermaid
 flowchart LR
@@ -321,7 +378,7 @@ flowchart LR
 | Database access | Drizzle ORM |
 | Runtime schemas | Zod |
 | LLM integration | OpenAI Responses API using the official JavaScript SDK |
-| Model | Configurable through `OPENAI_MODEL`; initial target `gpt-5.4-mini` |
+| Model | Configurable through `OPENAI_MODEL`; default `gpt-5.4-mini` |
 | Unit and integration tests | Vitest |
 | Browser tests | Playwright |
 | Local infrastructure | Docker Compose for PostgreSQL |
@@ -344,7 +401,7 @@ src/
 └── evaluation/           # Scenario fixtures, assertions, and runner
 ```
 
-This is a direction rather than a requirement to create unnecessary abstractions. The first implementation will stay small while preserving these responsibility boundaries.
+The implementation also contains `repositories/` for swappable memory/PostgreSQL storage and `components/` for the buyer experience. The domain, planning, policy, and workflow layers do not import React or Next.js.
 
 ## Evaluation strategy
 
@@ -375,23 +432,27 @@ Each case should verify:
 - the resulting business state was validated;
 - failed or unexpected outcomes entered recovery safely.
 
-## Implementation plan
+## Implemented milestone
 
-1. Establish the domain model and persistent workflow states.
-2. Create mock operational data and typed read APIs.
-3. Implement the deterministic planning and constraint engines.
-4. Implement Scenario 1 evaluations without the LLM.
-5. Add the LLM investigation and explanation layer.
-6. Build the buyer case and approval experience.
-7. Add idempotent PO execution and post-action validation.
-8. Demonstrate Scenario 1 transitioning into a supplier-shortfall recovery case.
-9. Complete documentation, architecture, setup instructions, and demo guidance.
+- [x] Domain model and persistent workflow states
+- [x] Mock operational evidence and typed read-only adapters
+- [x] Deterministic planning and constraint engine
+- [x] Scenario 1 decision evaluation suite
+- [x] Optional OpenAI structured buyer briefing
+- [x] Buyer attention queue and evidence review experience
+- [x] Versioned approval and live-data revalidation
+- [x] Idempotent PO execution and exact post-action validation
+- [x] Supplier-shortfall recovery transition
+- [x] Memory and PostgreSQL repository adapters
+- [x] Setup, architecture, evaluation, and demo guidance
+
+The next milestone will generalise the event handler for Scenarios 2–4, introduce alternate-supplier/transfer candidate generation, persist generated briefings, and add browser-level CI tests.
 
 ## Current status
 
-Planning and architecture baseline only. Application implementation has not started.
+Scenario 1 is executable end to end. The production build passes, 18 automated tests pass, all eight standalone decision evaluations pass, and PostgreSQL migration/seed/write/read-back have been smoke-tested locally.
 
-Setup and run instructions will be added as the executable project is introduced in subsequent commits.
+Memory mode is deliberately available for a reliable interview demo. PostgreSQL mode demonstrates the persistence boundary used in a deployed service.
 
 ## Security
 
@@ -400,7 +461,8 @@ Setup and run instructions will be added as the executable project is introduced
 - Required environment variables will be documented in `.env.example`.
 - All action attempts and approval decisions will be auditable.
 - Mock services will be used for external operational systems.
+- `npm audit --omit=dev` reports zero production vulnerabilities. The full development audit currently reports four moderate findings through Drizzle Kit's deprecated `@esbuild-kit` loader; the affected package is confined to local schema-generation tooling. A forced audit fix would downgrade Drizzle Kit across a breaking boundary, so the project tracks the upstream fix instead of silently forcing an incompatible version.
 
 ## Design status
 
-This README is intentionally versioned through Git history. Future commits will update it as assumptions are tested and implementation decisions become concrete.
+This README is intentionally versioned through Git history. Commit 1 is the pre-code design baseline; the current version records which assumptions survived implementation and which trade-offs were made for a focused Scenario 1 slice.
